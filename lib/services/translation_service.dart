@@ -21,7 +21,8 @@ class TranslationService {
       throw Exception('没有可翻译的内容');
     }
 
-    final url = Uri.parse('${_normalizeBase(settings.baseUrl)}/chat/completions');
+    final url =
+        Uri.parse('${_normalizeBase(settings.baseUrl)}/chat/completions');
     final body = jsonEncode({
       'model': settings.model,
       'messages': [
@@ -58,7 +59,8 @@ class TranslationService {
     }
 
     try {
-      final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      final data =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
       final choices = data['choices'] as List?;
       final content =
           (choices?.first as Map?)?['message']?['content'] as String?;

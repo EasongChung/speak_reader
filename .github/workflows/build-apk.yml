@@ -3,14 +3,15 @@ name: Build Android APK & Release
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    branches: [main]
+    tags: ['v*']
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -18,99 +19,79 @@ jobs:
       - name: 安装 Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: 安装 Flutter
+      - name: 安装 Flutter 3.22.3
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.x'
-          channel: 'stable'
+          flutter-version: '3.22.3'
+          channel: stable
+          cache: true
 
-      - name: 检查 Flutter
-        run: flutter doctor --version
-
-      # ============================================================
-      # flutter create 生成标准 Groovy Android 脚手架
-      # 恢复自定义资源后，追加 build-optimizations.gradle 到 app/build.gradle
-      # 确保 Flutter 校验 100% 通过（标准 Groovy 格式）
-      # ============================================================
-      - name: 生成标准 Android 脚手架
+      - name: 检查工具链
         run: |
-          TMPDIR=$(mktemp -d)
-          cd "$TMPDIR"
-          flutter create --org com.example --project-name speak_reader --platforms=android . 2>&1
-          cd "$OLDPWD"
-          rm -rf android/
-          cp -r "$TMPDIR/android" .
-          chmod +x android/gradlew
-          rm -rf "$TMPDIR"
-          echo "===== 标准 Gradle 结构 ====="
-          ls -la android/ android/app/
+          flutter --version
+          java -version
+          ./android/gradlew --version
 
-      - name: 恢复自定义资源 + 注入优化配置
+      - name: 按锁文件获取依赖
+        run: flutter pub get --enforce-lockfile
+
+      - name: 检查 Dart 格式
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: 静态分析
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: 运行测试
+        run: flutter test
+
+      - name: 构建 arm64 Release APK
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: 校验并重命名 APK
+        shell: bash
         run: |
-          # 恢复被 rm -rf android/ 删除的自定义文件（不包含 build.gradle 等脚手架文件）
-          git checkout android/app/src/main/
-          git checkout android/app/build-optimizations.gradle
-          git checkout android/app/proguard-rules.pro
-          # 升级 Kotlin + AGP + Gradle 版本（flutter_tts 4.2.5 用 Kotlin 2.2 编译，需匹配）
-          sed -i 's/org.jetbrains.kotlin.android" version "[^"]*"/org.jetbrains.kotlin.android" version "2.2.0"/' android/settings.gradle
-          sed -i 's/com.android.application" version "[^"]*"/com.android.application" version "8.7.0"/' android/settings.gradle
-          sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.9-all.zip|' android/gradle/wrapper/gradle-wrapper.properties
-          # 追加体积优化配置
-          cat android/app/build-optimizations.gradle >> android/app/build.gradle
-          echo "===== 注入后的 app/build.gradle ====="
-          cat android/app/build.gradle
+          set -euo pipefail
+          SOURCE="build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$SOURCE"
+          VERSION=$(perl -ne 'print $1 if /^version:\s*([^+\s]+)/' pubspec.yaml)
+          test -n "$VERSION"
+          DEST="build/app/outputs/flutter-apk/speak-reader-${VERSION}-${GITHUB_SHA::7}-arm64-v8a.apk"
+          mv "$SOURCE" "$DEST"
+          sha256sum "$DEST"
+          ls -lh "$DEST"
 
-      - name: 获取依赖
-        run: flutter pub get
-
-      - name: 构建 Release APK
-        run: |
-          # 注意: 不传 --split-per-abi (与 abiFilters 冲突), abiFilters 已在 build.gradle 中配置
-          flutter build apk --release
-          ls build/app/outputs/flutter-apk/
-
-      - name: 重命名 APK
-        run: |
-          VERSION="2.4.0"
-          if [ -d ".git" ]; then
-            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
-          fi
-          mv build/app/outputs/flutter-apk/app-release.apk \
-             build/app/outputs/flutter-apk/speak-reader-${VERSION}-arm64-v8a.apk 2>/dev/null || true
-
-      - name: 上传 APK(Actions Artifact)
+      - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
-          name: speak-reader-apk
-          path: build/app/outputs/flutter-apk/speak-reader-*.apk
+          name: speak-reader-apk-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/speak-reader-*-arm64-v8a.apk
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: 判断是否为标签推送
-        id: check-tag
-        run: |
-          if [[ $GITHUB_REF == refs/tags/* ]]; then
-            echo "is_tag=true" >> $GITHUB_OUTPUT
-            echo "tag_name=$(echo $GITHUB_REF | cut -d'/' -f3)" >> $GITHUB_OUTPUT
-            echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-          else
-            echo "is_tag=false" >> $GITHUB_OUTPUT
-          fi
+      - name: 读取标签信息
+        if: startsWith(github.ref, 'refs/tags/')
+        id: tag
         shell: bash
+        run: |
+          echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: 发布到 Releases
-        if: steps.check-tag.outputs.is_tag == 'true'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Speak Reader ${{ github.ref_name }}
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Speak Reader ${{ steps.tag.outputs.name }}
           body: |
-            📱 Speak Reader APK 构建
-            版本: ${{ github.ref_name }}
-            架构: arm64-v8a (精简版)
-            构建日期: ${{ steps.check-tag.outputs.date }}
-            [查看工作流](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            Speak Reader Android APK
+            版本: ${{ steps.tag.outputs.name }}
+            架构: arm64-v8a
+            构建日期: ${{ steps.tag.outputs.date }}
+            工作流: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           files: build/app/outputs/flutter-apk/speak-reader-*-arm64-v8a.apk
           draft: false
           prerelease: false

@@ -3,7 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../models/document.dart';
-import '../services/audio_export_service.dart';
+import '../services/audio_export_service.dart'
+    show AudioExportService, CancellationException;
 import '../services/tts_service.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
@@ -37,10 +38,13 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _originalMode = false;
   bool _translating = false;
   bool _exporting = false;
+  bool _exportCancelled = false;
   // [v2.4.0] 句子折叠翻译: 已展开译文的 token index → 译文文本
   final Map<int, String> _translations = {};
   // [v2.4.0] 底部文本面板的刷新回调(StatefulBuilder setSheet)
   VoidCallback? _sheetRebuild;
+  int _contentRevision = 0;
+  int _translationRequest = 0;
   late TextEditingController _editController;
 
   final _tokenKeys = <int, GlobalKey>{};
@@ -71,26 +75,37 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Future<void> _init() async {
-    _settings = await _settingsService.load();
+    final settings = await _settingsService.load();
+    if (!mounted) return;
+
+    _settings = settings;
     // 把设置里的参数灌进 TTS 引擎
-    _tts.speechRate = _settings.speechRate;
-    _tts.repeatCount = _settings.repeatCount;
-    _tts.dictationGapSeconds = _settings.dictationGapSeconds;
-    _tts.repeatGapSeconds = _settings.repeatGapSeconds;
-    _tts.dictationRate = _settings.dictationRate;
-    _tts.loop = _settings.loop;
-    _audioExport.customDir = _settings.customOutputDir;
+    _tts.speechRate = settings.speechRate;
+    _tts.repeatCount = settings.repeatCount;
+    _tts.dictationGapSeconds = settings.dictationGapSeconds;
+    _tts.repeatGapSeconds = settings.repeatGapSeconds;
+    _tts.dictationRate = settings.dictationRate;
+    _tts.loop = settings.loop;
+    _audioExport.customDir = settings.customOutputDir;
     await _tts.init();
+    if (!mounted) return;
+
     _tts.setText(_doc.content); // 默认常规模式切句
-    if (mounted) setState(() {});
+    setState(() {});
     // 开启了"自动生成音频"时,后台静默导出一份(不阻断朗读)
-    if (_settings.autoExportAudio) {
+    if (settings.autoExportAudio) {
       _exportAudio(auto: true);
     }
   }
 
   @override
   void dispose() {
+    _translationRequest++;
+    _exportCancelled = true;
+    _sheetRebuild = null;
+    _tts.onTokenChanged = null;
+    _tts.onStateChanged = null;
+    _tts.onComplete = null;
     _tts.dispose();
     // [v2.4.0] 移除: _offlineTranslation.dispose()
     _scrollController.dispose();
@@ -133,19 +148,24 @@ class _ReaderPageState extends State<ReaderPage> {
 
   Future<void> _toggleDictation(bool v) async {
     await _tts.stop();
+    if (!mounted) return;
     setState(() {
       // 切换模式需按新模式重新切分文本
       _tts.setModeAndText(v, _doc.content);
+      _contentRevision++;
+      _translationRequest++;
+      _translating = false;
       _currentToken = -1;
       _tokenKeys.clear();
       _translations.clear(); // [v2.4.0] 切换模式时译文索引失效
     });
+    _sheetRebuild?.call();
   }
 
   // ---------------- 音频导出 ----------------
 
   Future<void> _exportAudio({bool auto = false}) async {
-    if (_exporting) return;
+    if (!mounted || _exporting) return;
     if (_doc.content.trim().isEmpty) {
       if (!auto) _toast('没有可朗读的内容');
       return;
@@ -186,15 +206,20 @@ class _ReaderPageState extends State<ReaderPage> {
         gapSeconds: _tts.dictationGapSeconds,
         repeatGapSeconds: _tts.repeatGapSeconds,
         baseName: _doc.title,
+        stableId: _doc.id,
         stableName: auto,
+        cancel: () => _exportCancelled,
         onProgress: (p) => progress.value = p,
       );
       if (!auto && mounted) Navigator.of(context).pop(); // 关进度框
       if (auto) {
-        _toastWithAction('已生成音频:${_basename(path)}', '分享', () => _sharePath(path));
+        _toastWithAction(
+            '已生成音频:${_basename(path)}', '分享', () => _sharePath(path));
       } else if (mounted) {
         _showExportResult(path);
       }
+    } on CancellationException {
+      if (!auto && mounted) Navigator.of(context).pop();
     } catch (e) {
       if (!auto && mounted) Navigator.of(context).pop();
       if (auto) {
@@ -254,7 +279,8 @@ class _ReaderPageState extends State<ReaderPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text('已生成的音频',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 if (files.isEmpty)
                   const Padding(
@@ -277,7 +303,8 @@ class _ReaderPageState extends State<ReaderPage> {
                         final name = _basename(f.path);
                         return ListTile(
                           leading: const Icon(Icons.audio_file),
-                          title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          title: Text(name,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
                           subtitle: Text(_fileSize(f)),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
@@ -341,46 +368,55 @@ class _ReaderPageState extends State<ReaderPage> {
   /// [v2.4.0] 翻译当前高亮句子,在本句下方折叠展开/收起译文
   Future<void> _translate() async {
     // 确定要翻译的句子索引: 优先高亮,否则第一句
-    int? targetIndex;
+    int? candidateIndex;
     if (_currentToken >= 0 && _currentToken < _tts.tokens.length) {
-      targetIndex = _currentToken;
+      candidateIndex = _currentToken;
+    } else if (_tts.tokens.isNotEmpty) {
+      candidateIndex = 0;
     }
-    if (targetIndex == null && _tts.tokens.isNotEmpty) {
-      targetIndex = 0;
-    }
-    if (targetIndex == null || _tts.tokens[targetIndex].trim().isEmpty) {
+    if (candidateIndex == null || _tts.tokens[candidateIndex].trim().isEmpty) {
       _toast('没有可翻译的内容');
       return;
     }
 
-    final sentence = _tts.tokens[targetIndex];
+    final int index = candidateIndex;
+    final sentence = _tts.tokens[index];
 
     // 已展开 → 折叠(收起译文)
-    if (_translations.containsKey(targetIndex)) {
-      setState(() => _translations.remove(targetIndex));
-      // [v2.4.0] 同步刷新底部面板
+    if (_translations.containsKey(index)) {
+      setState(() => _translations.remove(index));
       _sheetRebuild?.call();
       return;
     }
 
-    // 已配 API 检查
     if (!_settings.translationReady) {
-      _toast('请先到「设置」配置翻译 API');
+      _toast('请先到「设置」完整配置翻译 API');
       return;
     }
 
+    final request = ++_translationRequest;
+    final revision = _contentRevision;
     setState(() => _translating = true);
     try {
-      final result = await _translation.translate(sentence, settings: _settings);
-      if (mounted) {
-        setState(() => _translations[targetIndex] = result);
-        // [v2.4.0] 同步刷新底部面板 UI
-        _sheetRebuild?.call();
+      final result =
+          await _translation.translate(sentence, settings: _settings);
+      if (!mounted ||
+          request != _translationRequest ||
+          revision != _contentRevision ||
+          index >= _tts.tokens.length ||
+          _tts.tokens[index] != sentence) {
+        return;
       }
+      setState(() => _translations[index] = result);
+      _sheetRebuild?.call();
     } catch (e) {
-      _toast('翻译失败:$e');
+      if (mounted && request == _translationRequest) {
+        _toast('翻译失败:$e');
+      }
     } finally {
-      if (mounted) setState(() => _translating = false);
+      if (mounted && request == _translationRequest) {
+        setState(() => _translating = false);
+      }
     }
   }
 
@@ -389,17 +425,26 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _toggleEdit() async {
     if (_editing) {
       await _tts.stop();
+      if (!mounted) return;
       setState(() {
         _doc.content = _editController.text;
         _editing = false;
+        _contentRevision++;
+        _translationRequest++;
+        _translating = false;
+        _translations.clear();
+        _tokenKeys.clear();
       });
       _tts.setText(_doc.content);
+      _sheetRebuild?.call();
       await _storage.upsert(_doc);
+      if (!mounted) return;
       _toast('已保存');
       // 内容变了,若开启了自动导出则重新生成音频
       if (_settings.autoExportAudio) _exportAudio(auto: true);
     } else {
       await _tts.stop();
+      if (!mounted) return;
       _editController.text = _doc.content;
       setState(() => _editing = true);
     }
@@ -451,8 +496,7 @@ class _ReaderPageState extends State<ReaderPage> {
       body: _originalMode
           ? _buildOriginalReader()
           : (_editing ? _buildEditor() : _buildReader()),
-      bottomNavigationBar:
-          _editing ? null : _buildControls(),
+      bottomNavigationBar: _editing ? null : _buildControls(),
     );
   }
 
@@ -627,7 +671,8 @@ class _ReaderPageState extends State<ReaderPage> {
                     ),
                   ),
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                     child: Row(
                       children: [
                         const Icon(Icons.text_fields, size: 18),
@@ -688,7 +733,8 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// [v2.4.0] 单个 token 行 + 折叠译文(若有)
-  Widget _buildTokenWithTranslation(int index, String tokenText, TextStyle baseStyle) {
+  Widget _buildTokenWithTranslation(
+      int index, String tokenText, TextStyle baseStyle) {
     final isHighlighted = index == _currentToken;
     final hasTranslation = _translations.containsKey(index);
     return Column(

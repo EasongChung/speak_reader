@@ -4,7 +4,6 @@ import 'package:file_picker/file_picker.dart';
 import '../services/audio_export_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_service.dart';
-import '../services/tts_service.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -16,7 +15,6 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   final _service = SettingsService();
   final _translation = TranslationService();
-  final _tts = TtsService();
   final _audioExport = AudioExportService();
 
   AppSettings _s = AppSettings();
@@ -24,6 +22,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _obscureKey = true;
   bool _testing = false;
   String? _outputDir;
+  int _loadRequest = 0;
+  int _directoryRequest = 0;
+  int _testRequest = 0;
 
   late TextEditingController _baseCtrl;
   late TextEditingController _keyCtrl;
@@ -39,20 +40,26 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _load() async {
-    final s = await _service.load();
-    _tts.dictationRate = s.dictationRate;
-    await _tts.init();
-    _audioExport.customDir = s.customOutputDir;
+    final request = ++_loadRequest;
     try {
-      _outputDir = await _audioExport.outputDirPath();
-    } catch (_) {}
-    setState(() {
-      _s = s;
-      _baseCtrl.text = s.baseUrl;
-      _keyCtrl.text = s.apiKey;
-      _modelCtrl.text = s.model;
-      _loaded = true;
-    });
+      final settings = await _service.load();
+      if (!mounted || request != _loadRequest) return;
+      _audioExport.customDir = settings.customOutputDir;
+      final outputDir = await _audioExport.outputDirPath();
+      if (!mounted || request != _loadRequest) return;
+      setState(() {
+        _s = settings;
+        _outputDir = outputDir;
+        _baseCtrl.text = settings.baseUrl;
+        _keyCtrl.text = settings.apiKey;
+        _modelCtrl.text = settings.model;
+        _loaded = true;
+      });
+    } catch (e) {
+      if (!mounted || request != _loadRequest) return;
+      setState(() => _loaded = true);
+      _toast('加载设置失败:$e');
+    }
   }
 
   @override
@@ -60,24 +67,30 @@ class _SettingsPageState extends State<SettingsPage> {
     _baseCtrl.dispose();
     _keyCtrl.dispose();
     _modelCtrl.dispose();
-    _tts.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
-    await _persist();
-    if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('已保存')));
+    try {
+      await _persist();
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已保存')));
+      }
+    } catch (e) {
+      if (mounted) _toast('保存失败: $e');
     }
   }
 
-  /// 持久化当前设置(同步文本框内容后保存)。音频即时改动也走这里。
+  /// 持久化当前设置（冻结文本框内容为快照后串行保存）。
   Future<void> _persist() async {
-    _s.baseUrl = _baseCtrl.text;
-    _s.apiKey = _keyCtrl.text;
-    _s.model = _modelCtrl.text;
-    await _service.save(_s);
+    final snapshot = _s.copyWith(
+      baseUrl: _baseCtrl.text,
+      apiKey: _keyCtrl.text,
+      model: _modelCtrl.text,
+    );
+    await _service.save(snapshot);
+    _s = snapshot;
   }
 
   void _toast(String msg) {
@@ -86,44 +99,62 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _pickOutputDir() async {
+    final request = ++_directoryRequest;
     try {
       final dir = await FilePicker.platform.getDirectoryPath();
-      if (dir == null) return; // 用户取消
+      if (dir == null || !mounted || request != _directoryRequest) return;
       final writable = await _audioExport.isDirWritable(dir);
+      if (!mounted || request != _directoryRequest) return;
       if (!writable) {
         _toast('该目录不可写(可能受系统限制),已保留原目录');
         return;
       }
-      setState(() => _s.customOutputDir = dir);
+      _s = _s.copyWith(customOutputDir: dir);
       _audioExport.customDir = dir;
       _outputDir = dir;
       await _persist();
       _toast('导出目录已设为:$dir');
     } catch (e) {
-      _toast('选择目录失败:$e');
+      if (mounted && request == _directoryRequest) {
+        _toast('选择目录失败:$e');
+      }
     }
   }
 
   Future<void> _resetOutputDir() async {
-    setState(() => _s.customOutputDir = null);
-    _audioExport.customDir = null;
+    final request = ++_directoryRequest;
     try {
       _outputDir = await _audioExport.outputDirPath();
     } catch (_) {}
-    await _persist();
-    setState(() {});
+    if (!mounted || request != _directoryRequest) return;
+    _s = _s.copyWith(clearCustomOutputDir: true);
+    _audioExport.customDir = null;
+    try {
+      await _persist();
+    } catch (e) {
+      _toast('保存失败:$e');
+      return;
+    }
+    if (mounted && request == _directoryRequest) setState(() {});
     _toast('已恢复默认目录');
   }
 
   Future<void> _testConnection() async {
-    _s.baseUrl = _baseCtrl.text;
-    _s.apiKey = _keyCtrl.text;
-    _s.model = _modelCtrl.text;
-    await _service.save(_s);
+    if (_testing) return;
     setState(() => _testing = true);
+    final request = ++_testRequest;
+    final snapshot = _s.copyWith(
+      baseUrl: _baseCtrl.text,
+      apiKey: _keyCtrl.text,
+      model: _modelCtrl.text,
+    );
     try {
-      final r = await _translation.translate('Hello, world.', settings: _s);
-      if (mounted) {
+      await _service.save(snapshot);
+      if (!mounted || request != _testRequest) return;
+      _s = snapshot;
+      final r =
+          await _translation.translate('Hello, world.', settings: snapshot);
+      if (mounted && request == _testRequest) {
         showDialog(
           context: context,
           builder: (_) => AlertDialog(
@@ -138,7 +169,7 @@ class _SettingsPageState extends State<SettingsPage> {
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && request == _testRequest) {
         showDialog(
           context: context,
           builder: (_) => AlertDialog(
@@ -153,7 +184,9 @@ class _SettingsPageState extends State<SettingsPage> {
         );
       }
     } finally {
-      if (mounted) setState(() => _testing = false);
+      if (mounted && request == _testRequest) {
+        setState(() => _testing = false);
+      }
     }
   }
 
@@ -201,8 +234,8 @@ class _SettingsPageState extends State<SettingsPage> {
               hintText: 'sk-...',
               border: const OutlineInputBorder(),
               suffixIcon: IconButton(
-                icon: Icon(
-                    _obscureKey ? Icons.visibility : Icons.visibility_off),
+                icon:
+                    Icon(_obscureKey ? Icons.visibility : Icons.visibility_off),
                 onPressed: () => setState(() => _obscureKey = !_obscureKey),
               ),
             ),
@@ -247,10 +280,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _s.dictationRate,
             0.1,
             1.0,
-            (v) => setState(() {
-              _s.dictationRate = v;
-              _tts.dictationRate = v;
-            }),
+            (v) => setState(() => _s.dictationRate = v),
             '${(_s.dictationRate * 100).round()}%',
           ),
           _stepper(
@@ -265,10 +295,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _s.repeatGapSeconds,
             0.0,
             5.0,
-            (v) => setState(() {
-              _s.repeatGapSeconds = v;
-              _tts.repeatGapSeconds = v;
-            }),
+            (v) => setState(() => _s.repeatGapSeconds = v),
             '${_s.repeatGapSeconds.toStringAsFixed(1)} 秒',
           ),
           _slider(
@@ -363,8 +390,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _sectionTitle(String t) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: Text(t,
-            style:
-                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
       );
 
   Widget _slider(String label, double value, double min, double max,

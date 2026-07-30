@@ -77,36 +77,47 @@ class TtsService {
   List<String> tokenizeForDictation(String text) => _tokenizeWords(text);
 
   // ---------- 常规模式:按句切分(第一版逻辑) ----------
+  static const int maxSpeakLength = 120;
+
   List<String> _splitSentences(String text) {
     final normalized = text.replaceAll('\r\n', '\n');
-    final rawParts = normalized.split(RegExp(r'(?<=[。!?！?;;\n])'));
+    final rawParts = normalized.split(RegExp(r'(?<=[。！？!?；;\n])'));
     final result = <String>[];
-    for (var part in rawParts) {
-      final s = part.trim();
-      if (s.isEmpty) continue;
-      if (s.length > 120) {
-        result.addAll(_splitLong(s));
-      } else {
-        result.add(s);
-      }
+    for (final part in rawParts) {
+      final sentence = part.trim();
+      if (sentence.isEmpty) continue;
+      result.addAll(_splitLong(sentence));
     }
-    return result.isEmpty ? [text.trim()] : result;
+    return result;
   }
 
-  List<String> _splitLong(String s) {
-    final parts = <String>[];
-    final byComma = s.split(RegExp(r'(?<=[,,、])'));
+  List<String> _splitLong(String text) {
+    final result = <String>[];
+    final segments = text.split(RegExp(r'(?<=[，,、：:])'));
     var buffer = '';
-    for (final seg in byComma) {
-      if ((buffer + seg).length > 120 && buffer.isNotEmpty) {
-        parts.add(buffer);
-        buffer = seg;
-      } else {
-        buffer += seg;
-      }
+
+    void flushBuffer() {
+      final value = buffer.trim();
+      if (value.isNotEmpty) result.add(value);
+      buffer = '';
     }
-    if (buffer.trim().isNotEmpty) parts.add(buffer);
-    return parts;
+
+    for (final segment in segments) {
+      var remaining = segment.trim();
+      if (remaining.isEmpty) continue;
+
+      if (buffer.isNotEmpty &&
+          buffer.length + remaining.length > maxSpeakLength) {
+        flushBuffer();
+      }
+      while (remaining.length > maxSpeakLength) {
+        result.add(remaining.substring(0, maxSpeakLength));
+        remaining = remaining.substring(maxSpeakLength);
+      }
+      if (remaining.isNotEmpty) buffer += remaining;
+    }
+    flushBuffer();
+    return result;
   }
 
   // ---------- 听写模式:词组切分,过滤纯标点 ----------
@@ -235,10 +246,11 @@ class TtsService {
     try {
       final file = File(fullPath);
       if (await file.exists()) await file.delete();
-      await _tts.synthesizeToFile(text, fullPath, true).timeout(
-        const Duration(seconds: 90),
-        onTimeout: () => debugPrint('synthToFile timeout: $text'),
-      );
+      final ok = await _tts.synthesizeToFile(text, fullPath).timeout(
+            const Duration(seconds: 90),
+            onTimeout: () => false,
+          );
+      if (!ok) return false;
       return await file.exists() && await file.length() > 44;
     } catch (e) {
       debugPrint('synthToFile error: $e');
@@ -254,8 +266,7 @@ class TtsService {
       if (myToken != _playToken) return;
       onTokenChanged?.call(_currentIndex);
 
-      final reps =
-          dictationMode ? (repeatCount < 1 ? 1 : repeatCount) : 1;
+      final reps = dictationMode ? (repeatCount < 1 ? 1 : repeatCount) : 1;
       for (var r = 0; r < reps; r++) {
         if (myToken != _playToken) return;
         await _tts.speak(_tokens[_currentIndex]);
@@ -269,7 +280,8 @@ class TtsService {
       _currentIndex++;
 
       // 听写模式在词组间插入书写停顿;常规模式连读(无额外停顿)
-      if (dictationMode && dictationGapSeconds > 0 &&
+      if (dictationMode &&
+          dictationGapSeconds > 0 &&
           _currentIndex < _tokens.length) {
         await _sleep(dictationGapSeconds);
         if (myToken != _playToken) return;

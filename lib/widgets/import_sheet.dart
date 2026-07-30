@@ -28,10 +28,10 @@ class ImportSheet extends StatelessWidget {
               child: Text('选择导入方式',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             ),
-            _tile(context, Icons.camera_alt, '拍照识别',
-                '用相机拍下文字,自动识别', ImportChoice.camera),
-            _tile(context, Icons.photo_library, '从相册选图',
-                '选择已有图片进行文字识别', ImportChoice.gallery),
+            _tile(context, Icons.camera_alt, '拍照识别', '用相机拍下文字,自动识别',
+                ImportChoice.camera),
+            _tile(context, Icons.photo_library, '从相册选图', '选择已有图片进行文字识别',
+                ImportChoice.gallery),
             _tile(context, Icons.insert_drive_file, '选择文档',
                 '导入 Word / PDF / TXT 文件', ImportChoice.file),
           ],
@@ -45,8 +45,8 @@ class ImportSheet extends StatelessWidget {
     return ListTile(
       leading: CircleAvatar(
         backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-        child: Icon(icon,
-            color: Theme.of(context).colorScheme.onPrimaryContainer),
+        child:
+            Icon(icon, color: Theme.of(context).colorScheme.onPrimaryContainer),
       ),
       title: Text(title),
       subtitle: Text(subtitle),

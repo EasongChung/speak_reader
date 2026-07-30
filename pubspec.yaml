@@ -13,7 +13,7 @@ dependencies:
   cupertino_icons: ^1.0.6
 
   # 语音朗读(系统内置 TTS)
-  flutter_tts: ^4.0.2
+  flutter_tts: 4.0.2
 
   # 拍照 / 相册取图
   image_picker: ^1.1.2
@@ -24,8 +24,8 @@ dependencies:
   # Word(.docx)转文本
   docx_to_text: ^1.0.1
 
-  # PDF 文本提取(轻量替代,基于 pdfium,无 Syncfusion 原生代码膨胀)
-  pdfx: ^2.6.0
+  # PDF 文本层提取(Android 基于 PDFBox)
+  flutter_pdf_text: 0.9.0
 
   # 运行时权限
   permission_handler: ^11.3.1
@@ -38,6 +38,7 @@ dependencies:
 
   # 文件目录(音频导出输出路径)
   path_provider: ^2.1.4
+  path: ^1.9.1
 
   # 分享/打开生成的音频文件
   # 需 >=10.0.1 才依赖 web ^1.0.0(与 file_picker 兼容);
@@ -47,6 +48,8 @@ dependencies:
   # [v2.4.0] 移除: google_mlkit_translation/google_mlkit_language_id (~15MB,国产机不可用)
 
 dev_dependencies:
+  flutter_test:
+    sdk: flutter
   flutter_lints: ^4.0.0
 
 flutter:

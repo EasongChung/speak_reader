@@ -72,9 +72,8 @@ class VisionOcrService {
     try {
       final data =
           jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      final content =
-          ((data['choices'] as List?)?.first as Map?)?['message']?['content']
-              as String?;
+      final content = ((data['choices'] as List?)?.first as Map?)?['message']
+          ?['content'] as String?;
       if (content == null || content.trim().isEmpty) {
         throw Exception('模型未返回文字(该模型可能不支持图片输入)');
       }

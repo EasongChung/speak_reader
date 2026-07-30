@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -30,6 +30,8 @@ class _HomePageState extends State<HomePage> {
 
   List<Document> _docs = [];
   bool _loading = false;
+  int _refreshGeneration = 0;
+  final Random _random = Random.secure();
 
   @override
   void initState() {
@@ -43,25 +45,38 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _refresh() async {
-    final docs = await _storage.loadAll();
-    if (mounted) setState(() => _docs = docs);
+    final generation = ++_refreshGeneration;
+    try {
+      final docs = await _storage.loadAll();
+      if (mounted && generation == _refreshGeneration) {
+        setState(() => _docs = docs);
+      }
+    } catch (e) {
+      _toast('读取历史记录失败:$e');
+    }
   }
 
   // ---------------- 导入流程 ----------------
 
   Future<void> _onImport() async {
+    if (_loading) return;
     final choice = await ImportSheet.show(context);
-    if (choice == null) return;
-    switch (choice) {
-      case ImportChoice.camera:
-        await _importFromCamera();
-        break;
-      case ImportChoice.gallery:
-        await _importFromGallery();
-        break;
-      case ImportChoice.file:
-        await _importFromFile();
-        break;
+    if (!mounted || choice == null || _loading) return;
+    setState(() => _loading = true);
+    try {
+      switch (choice) {
+        case ImportChoice.camera:
+          await _importFromCamera();
+          break;
+        case ImportChoice.gallery:
+          await _importFromGallery();
+          break;
+        case ImportChoice.file:
+          await _importFromFile();
+          break;
+      }
+    } finally {
+      _setLoading(false);
     }
   }
 
@@ -74,11 +89,13 @@ class _HomePageState extends State<HomePage> {
         maxWidth: 2200,
         maxHeight: 2200,
       );
-      if (shot == null) return;
-      // [v2.4.0] 保存原始文件到私有目录
-      final origPath = await _saveOriginalFile(shot.path, 'jpg');
-      await _runOcr(shot.path, DocSource.camera,
-          originalPath: origPath, originalFileMime: 'image/jpeg');
+      if (shot == null || !mounted) return;
+      await _runOcr(
+        shot.path,
+        DocSource.camera,
+        originalExtension: 'jpg',
+        originalFileMime: 'image/jpeg',
+      );
     } catch (e) {
       _toast('拍照失败:$e');
     }
@@ -92,13 +109,14 @@ class _HomePageState extends State<HomePage> {
         maxWidth: 2200,
         maxHeight: 2200,
       );
-      if (img == null) return;
-      // [v2.4.0] 保存原始文件到私有目录
-      final ext = img.path.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
-      final mime = ext == 'png' ? 'image/png' : 'image/jpeg';
-      final origPath = await _saveOriginalFile(img.path, ext);
-      await _runOcr(img.path, DocSource.gallery,
-          originalPath: origPath, originalFileMime: mime);
+      if (img == null || !mounted) return;
+      final ext = _imageExtension(img.path);
+      await _runOcr(
+        img.path,
+        DocSource.gallery,
+        originalExtension: ext,
+        originalFileMime: _imageMime(ext),
+      );
     } catch (e) {
       _toast('选图失败:$e');
     }
@@ -107,35 +125,34 @@ class _HomePageState extends State<HomePage> {
   Future<void> _runOcr(
     String path,
     DocSource source, {
-    // [v2.4.0] 原文文件信息（可选参数，向下兼容）
-    String? originalPath,
-    String? originalFileMime,
+    required String originalExtension,
+    required String originalFileMime,
   }) async {
-    _setLoading(true);
     try {
       final settings = await _settingsService.load();
+      if (!mounted) return;
       if (!settings.translationReady) {
         _toast('图片识别需要先到「设置」配置 API(支持视觉的模型,如 gpt-4o、qwen-vl)');
         return;
       }
       final text = await _visionOcr.recognizeFile(path, settings: settings);
+      if (!mounted) return;
       if (text.trim().isEmpty) {
         _toast('未识别到文字,请换一张更清晰的图片');
         return;
       }
+
+      final originalPath = await _storage.copyOriginal(path, originalExtension);
       final doc = _newDoc(
         title: source == DocSource.camera ? '拍照识别' : '相册识别',
         content: text,
         source: source,
-        // [v2.4.0] 传递原文文件信息
         originalFilePath: originalPath,
         originalFileMime: originalFileMime,
       );
-      await _openAndSave(doc);
+      await _commitAndOpen(doc, rollbackOriginalPath: originalPath);
     } catch (e) {
       _toast('识别失败:$e');
-    } finally {
-      _setLoading(false);
     }
   }
 
@@ -146,34 +163,31 @@ class _HomePageState extends State<HomePage> {
         allowedExtensions: ['docx', 'pdf', 'txt', 'md'],
       );
       final path = result?.files.single.path;
-      if (path == null) return;
+      if (path == null || !mounted) return;
 
-      _setLoading(true);
-      // [v2.4.0] PDF 导入时保存原始文件
-      String? origPath;
-      String? origMime;
-      if (path.toLowerCase().endsWith('.pdf')) {
-        origPath = await _saveOriginalFile(path, 'pdf');
-        origMime = 'application/pdf';
-      }
       final imported = await _import.importFile(path);
+      if (!mounted) return;
       if (imported.content.trim().isEmpty) {
         _toast('文档中没有可朗读的文字');
         return;
+      }
+
+      String? originalPath;
+      String? originalMime;
+      if (path.toLowerCase().endsWith('.pdf')) {
+        originalPath = await _storage.copyOriginal(path, 'pdf');
+        originalMime = 'application/pdf';
       }
       final doc = _newDoc(
         title: imported.title,
         content: imported.content,
         source: imported.source,
-        // [v2.4.0] 传递原文文件信息
-        originalFilePath: origPath,
-        originalFileMime: origMime,
+        originalFilePath: originalPath,
+        originalFileMime: originalMime,
       );
-      await _openAndSave(doc);
+      await _commitAndOpen(doc, rollbackOriginalPath: originalPath);
     } catch (e) {
       _toast('导入失败:$e');
-    } finally {
-      _setLoading(false);
     }
   }
 
@@ -187,7 +201,7 @@ class _HomePageState extends State<HomePage> {
   }) {
     final now = DateTime.now();
     return Document(
-      id: now.microsecondsSinceEpoch.toString(),
+      id: '${now.microsecondsSinceEpoch}_${_randomToken()}',
       title: title,
       content: content,
       source: source,
@@ -197,25 +211,66 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // [v2.4.0] 保存原始文件副本到应用私有目录，返回目标路径
-  Future<String> _saveOriginalFile(String sourcePath, String ext) async {
-    final dir = await _storage.getOriginalsDir();
-    final destPath = '${dir.path}/${DateTime.now().microsecondsSinceEpoch}.$ext';
-    await File(sourcePath).copy(destPath);
-    return destPath;
+  Future<void> _commitAndOpen(
+    Document doc, {
+    String? rollbackOriginalPath,
+  }) async {
+    if (!mounted) {
+      if (rollbackOriginalPath != null) {
+        await _storage.deleteManagedOriginal(rollbackOriginalPath);
+      }
+      return;
+    }
+
+    List<Document> committedDocs;
+    try {
+      committedDocs = await _storage.upsert(doc);
+    } catch (_) {
+      if (rollbackOriginalPath != null) {
+        await _storage.deleteManagedOriginal(rollbackOriginalPath);
+      }
+      rethrow;
+    }
+
+    if (!mounted) return;
+    setState(() => _docs = committedDocs);
+    try {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => ReaderPage(document: doc)),
+      );
+      await _refresh();
+    } catch (e) {
+      _toast('文档已保存，但打开阅读页失败:$e');
+    }
   }
 
-  Future<void> _openAndSave(Document doc) async {
-    await _storage.upsert(doc);
-    await _refresh();
-    if (!mounted) return;
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ReaderPage(document: doc)),
-    );
-    // 从阅读页返回后可能编辑过标题/内容,刷新列表
-    await _refresh();
+  String _imageExtension(String path) {
+    final dot = path.lastIndexOf('.');
+    final ext = dot < 0 ? '' : path.substring(dot + 1).toLowerCase();
+    return const {'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'}.contains(ext)
+        ? ext
+        : 'jpg';
   }
+
+  String _imageMime(String ext) {
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'webp':
+        return 'image/webp';
+      case 'heic':
+        return 'image/heic';
+      case 'heif':
+        return 'image/heif';
+      default:
+        return 'image/jpeg';
+    }
+  }
+
+  String _randomToken() => List<int>.generate(8, (_) => _random.nextInt(256))
+      .map((value) => value.toRadixString(16).padLeft(2, '0'))
+      .join();
 
   // ---------------- 权限 ----------------
 
@@ -243,9 +298,15 @@ class _HomePageState extends State<HomePage> {
     await _refresh();
   }
 
-  Future<void> _deleteDoc(Document doc) async {
-    await _storage.delete(doc.id);
-    await _refresh();
+  Future<bool> _deleteDoc(Document doc) async {
+    try {
+      final docs = await _storage.delete(doc.id);
+      if (mounted) setState(() => _docs = docs);
+      return true;
+    } catch (e) {
+      _toast('删除失败:$e');
+      return false;
+    }
   }
 
   void _setLoading(bool v) {
@@ -332,11 +393,11 @@ class _HomePageState extends State<HomePage> {
               padding: const EdgeInsets.only(right: 20),
               child: const Icon(Icons.delete, color: Colors.white),
             ),
-            onDismissed: (_) => _deleteDoc(doc),
+            confirmDismiss: (_) => _deleteDoc(doc),
             child: ListTile(
               leading: CircleAvatar(child: Text(doc.source.label)),
-              title: Text(doc.title,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              title:
+                  Text(doc.title, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Text('${doc.createdAtText}\n${doc.preview}',
                   maxLines: 2, overflow: TextOverflow.ellipsis),
               isThreeLine: true,

@@ -38,8 +38,8 @@ class Document {
     required this.content,
     required this.source,
     required this.createdAt,
-    this.originalFilePath,   // [v2.4.0] 可选参数，向下兼容
-    this.originalFileMime,   // [v2.4.0] 可选参数，向下兼容
+    this.originalFilePath, // [v2.4.0] 可选参数，向下兼容
+    this.originalFileMime, // [v2.4.0] 可选参数，向下兼容
   });
 
   /// 用于列表展示的预览文本(截断)
@@ -56,7 +56,8 @@ class Document {
   }
 
   // [v2.4.0] 原文相关便利属性
-  bool get hasOriginal => originalFilePath != null && originalFilePath!.isNotEmpty;
+  bool get hasOriginal =>
+      originalFilePath != null && originalFilePath!.isNotEmpty;
   bool get isImageOriginal =>
       hasOriginal && (originalFileMime?.startsWith('image/') ?? false);
   bool get isPdfOriginal =>

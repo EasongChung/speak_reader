@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
+
 import 'package:docx_to_text/docx_to_text.dart';
-import 'package:pdfx/pdfx.dart';
+import 'package:flutter_pdf_text/flutter_pdf_text.dart';
 
 import '../models/document.dart';
 
@@ -47,42 +49,35 @@ class ImportService {
 
   Future<String> _readPdf(File file) async {
     try {
-      final document = await PdfDocument.openFile(file.path);
-      try {
-        final pageCount = await document.getPagesCount();
-        if (pageCount == 0) throw Exception('PDF 为空');
-        final sb = StringBuffer();
-        for (int i = 1; i <= pageCount; i++) {
-          final page = await document.getPage(i);
-          try {
-            sb.writeln(await page.getText());
-          } finally {
-            await page.close();
-          }
-        }
-        final text = sb.toString().trim();
-        if (text.isEmpty) {
-          throw Exception(
-              '该 PDF 可能是扫描件(图片版),没有可提取的文字层。\n'
-              '建议:把 PDF 页面截图后用「拍照/相册」导入做文字识别。');
-        }
-        return text;
-      } finally {
-        await document.close();
+      final document = await PDFDoc.fromFile(file);
+      if (document.length == 0) {
+        throw const FormatException('PDF 为空');
       }
+
+      final text = (await document.text).trim();
+      if (text.isEmpty) {
+        throw const FormatException(
+          '该 PDF 可能是扫描件(图片版),没有可提取的文字层。\n'
+          '建议:把 PDF 页面截图后用「拍照/相册」导入做文字识别。',
+        );
+      }
+      return text;
+    } on FormatException {
+      rethrow;
     } catch (e) {
-      if (e is Exception) rethrow;
       throw Exception('无法打开该 PDF:$e');
     }
   }
 
   Future<String> _readTxt(File file) async {
-    // 优先按 UTF-8,失败则回退系统编码
+    final bytes = await file.readAsBytes();
     try {
-      return (await file.readAsString()).trim();
-    } catch (_) {
-      final bytes = await file.readAsBytes();
-      return String.fromCharCodes(bytes).trim();
+      return utf8.decode(bytes, allowMalformed: false).trim();
+    } on FormatException catch (e) {
+      throw FormatException(
+        'TXT 不是有效的 UTF-8 文本，请先转换为 UTF-8 编码后再导入。',
+        e,
+      );
     }
   }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 导出音频格式。Android TTS synthesizeToFile 原生只产出 WAV(PCM),
@@ -9,8 +11,8 @@ enum AudioFormat {
   final String label;
   final String ext = 'wav';
 
-  static AudioFormat fromName(String? n) =>
-      AudioFormat.values.firstWhere((e) => e.name == n, orElse: () => AudioFormat.wav);
+  static AudioFormat fromName(String? n) => AudioFormat.values
+      .firstWhere((e) => e.name == n, orElse: () => AudioFormat.wav);
 }
 
 /// 应用设置持久化:翻译 API 配置 + 朗读参数默认值。
@@ -53,11 +55,49 @@ class AppSettings {
     this.customOutputDir,
   });
 
-  bool get translationReady => baseUrl.trim().isNotEmpty && apiKey.trim().isNotEmpty;
+  bool get translationReady =>
+      baseUrl.trim().isNotEmpty &&
+      apiKey.trim().isNotEmpty &&
+      model.trim().isNotEmpty;
+
+  AppSettings copyWith({
+    String? baseUrl,
+    String? apiKey,
+    String? model,
+    double? wordGapSeconds,
+    int? repeatCount,
+    double? dictationGapSeconds,
+    double? repeatGapSeconds,
+    bool? loop,
+    double? speechRate,
+    double? dictationRate,
+    bool? autoExportAudio,
+    AudioFormat? audioFormat,
+    String? customOutputDir,
+    bool clearCustomOutputDir = false,
+  }) =>
+      AppSettings(
+        baseUrl: baseUrl ?? this.baseUrl,
+        apiKey: apiKey ?? this.apiKey,
+        model: model ?? this.model,
+        wordGapSeconds: wordGapSeconds ?? this.wordGapSeconds,
+        repeatCount: repeatCount ?? this.repeatCount,
+        dictationGapSeconds: dictationGapSeconds ?? this.dictationGapSeconds,
+        repeatGapSeconds: repeatGapSeconds ?? this.repeatGapSeconds,
+        loop: loop ?? this.loop,
+        speechRate: speechRate ?? this.speechRate,
+        dictationRate: dictationRate ?? this.dictationRate,
+        autoExportAudio: autoExportAudio ?? this.autoExportAudio,
+        audioFormat: audioFormat ?? this.audioFormat,
+        customOutputDir: clearCustomOutputDir
+            ? null
+            : customOutputDir ?? this.customOutputDir,
+      );
 }
 
 class SettingsService {
   static const _kBaseUrl = 'cfg_base_url';
+  static Future<void> _saveTail = Future<void>.value();
   static const _kApiKey = 'cfg_api_key';
   static const _kModel = 'cfg_model';
   // [v2.4.0] 移除: _kPreferOfflineTr
@@ -93,25 +133,44 @@ class SettingsService {
     );
   }
 
-  Future<void> save(AppSettings s) async {
+  Future<void> save(AppSettings settings) {
+    final snapshot = settings.copyWith();
+    final completer = Completer<void>();
+    _saveTail = _saveTail.then((_) async {
+      try {
+        await _saveSnapshot(snapshot);
+        completer.complete();
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    return completer.future;
+  }
+
+  Future<void> _saveSnapshot(AppSettings s) async {
     final p = await SharedPreferences.getInstance();
-    await p.setString(_kBaseUrl, s.baseUrl.trim());
-    await p.setString(_kApiKey, s.apiKey.trim());
-    await p.setString(_kModel, s.model.trim());
-    // [v2.4.0] 移除: _kPreferOfflineTr
-    await p.setDouble(_kWordGap, s.wordGapSeconds);
-    await p.setInt(_kRepeat, s.repeatCount);
-    await p.setDouble(_kDictGap, s.dictationGapSeconds);
-    await p.setDouble(_kRepeatGap, s.repeatGapSeconds);
-    await p.setBool(_kLoop, s.loop);
-    await p.setDouble(_kRate, s.speechRate);
-    await p.setDouble(_kDictRate, s.dictationRate);
-    await p.setBool(_kAutoExport, s.autoExportAudio);
-    await p.setString(_kAudioFmt, s.audioFormat.name);
+    Future<void> require(Future<bool> op) async {
+      if (!await op) throw Exception('设置保存失败');
+    }
+
+    await require(p.setString(_kBaseUrl, s.baseUrl.trim()));
+    await require(p.setString(_kApiKey, s.apiKey.trim()));
+    await require(p.setString(_kModel, s.model.trim()));
+    await require(p.setDouble(_kWordGap, s.wordGapSeconds));
+    await require(p.setInt(_kRepeat, s.repeatCount));
+    await require(p.setDouble(_kDictGap, s.dictationGapSeconds));
+    await require(p.setDouble(_kRepeatGap, s.repeatGapSeconds));
+    await require(p.setBool(_kLoop, s.loop));
+    await require(p.setDouble(_kRate, s.speechRate));
+    await require(p.setDouble(_kDictRate, s.dictationRate));
+    await require(p.setBool(_kAutoExport, s.autoExportAudio));
+    await require(p.setString(_kAudioFmt, s.audioFormat.name));
     if (s.customOutputDir == null) {
-      await p.remove(_kOutDir);
+      if (!await p.remove(_kOutDir) && p.containsKey(_kOutDir)) {
+        throw Exception('设置保存失败');
+      }
     } else {
-      await p.setString(_kOutDir, s.customOutputDir!);
+      await require(p.setString(_kOutDir, s.customOutputDir!));
     }
   }
 }
