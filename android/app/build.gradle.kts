@@ -19,6 +19,10 @@ android {
     defaultConfig {
         minSdk = 21
         multiDexEnabled = false
+        // [v2.4.0] 仅打包 arm64-v8a，减小约 60% 的 .so 体积
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -32,17 +36,7 @@ android {
         }
     }
 
-    // =================== 体积优化：仅打包 arm64-v8a ===================
-    // 减少约60%的.so库体积，只保留主流CPU架构
-    flavorDimensions += "abi"
-    productFlavors {
-        create("arm64") {
-            dimension = "abi"
-            ndk {
-                abiFilters.add("arm64-v8a")
-            }
-        }
-    }
+    // [v2.4.0] 移除 productFlavors，改用 defaultConfig.ndk.abiFilters + --split-per-abi
 
     // 防止因多 flavour 混淆问题，明确所有 ABI 都输出到同一个目录
     packaging {
