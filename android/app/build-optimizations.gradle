@@ -1,6 +1,9 @@
 // =================== [v2.4.0] 体积优化 ===================
 // 以下为 speak_reader 项目自定义优化配置，CI 构建时自动追加到 app/build.gradle
 android {
+    // flutter_tts 要求 SDK 36，覆盖 flutter.compileSdk 的默认值
+    compileSdk = 36
+
     defaultConfig {
         ndk {
             abiFilters "arm64-v8a"
