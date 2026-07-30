@@ -31,31 +31,67 @@ jobs:
       - name: 检查 Flutter
         run: flutter doctor --version
 
-      # Flutter项目已包含完整的Android结构，不需要重新create
-      # 这里只验证flutter能正常读取项目
+      # ============================================================
+      # 关键步骤: 备份自定义配置 → flutter create 生成脚手架 → 恢复
+      # flutter create 会生成 gradlew, gradle-wrapper.jar, settings.gradle 等
+      # 但也会覆盖我们的 build.gradle.kts 和 styles.xml, 所以要恢复
+      # ============================================================
+      - name: 备份自定义 Android 配置
+        run: |
+          cp android/app/build.gradle.kts /tmp/build.gradle.kts.bak
+          cp android/app/src/main/res/values/styles.xml /tmp/styles.xml.bak
+          cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest.xml.bak 2>/dev/null || true
+          cp android/app/proguard-rules.pro /tmp/proguard-rules.pro.bak 2>/dev/null || true
+
+      - name: 生成标准 Gradle 脚手架
+        run: |
+          # 在临时目录创建临时 Flutter 项目, 只取 android/ 目录
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          flutter create --org com.example --project-name speak_reader --platforms=android . 2>&1
+          # 复制 gradle wrapper 文件到项目
+          cd "$OLDPWD"
+          cp -r "$TMPDIR/android/gradle" android/
+          cp "$TMPDIR/android/gradlew" android/gradlew
+          cp "$TMPDIR/android/gradlew.bat" android/gradlew.bat 2>/dev/null || true
+          chmod +x android/gradlew
+          # 复制项目级 gradle 配置
+          cp "$TMPDIR/android/build.gradle" android/build.gradle 2>/dev/null || true
+          cp "$TMPDIR/android/settings.gradle" android/settings.gradle 2>/dev/null || true
+          cp "$TMPDIR/android/gradle.properties" android/gradle.properties 2>/dev/null || true
+          # 复制本地 properties (sdk 路径)
+          cp "$TMPDIR/android/local.properties" android/local.properties 2>/dev/null || true
+          rm -rf "$TMPDIR"
+
+      - name: 恢复自定义 Android 配置
+        run: |
+          cp /tmp/build.gradle.kts.bak android/app/build.gradle.kts
+          cp /tmp/styles.xml.bak android/app/src/main/res/values/styles.xml
+          cp /tmp/AndroidManifest.xml.bak android/app/src/main/AndroidManifest.xml 2>/dev/null || true
+          cp /tmp/proguard-rules.pro.bak android/app/proguard-rules.pro 2>/dev/null || true
+          echo "===== Android 项目结构 ====="
+          ls -la android/
+          ls -la android/app/
+          ls -la android/gradle/wrapper/
 
       - name: 获取依赖
         run: flutter pub get
 
-      # [v2.4.0] build.gradle.kts 已内置 compileSdk=36 + minify + arm64 flavor
-      # 无需在 CI 中 sed 修改, 直接构建即可
-
       - name: 构建 Release APK
         run: |
-          # 使用 --split-per-abi 只生成 arm64-v8a（最大体积节省）
           flutter build apk --release --split-per-abi
-          # 确认生成了 arm64 的apk
           ls build/app/outputs/flutter-apk/
 
       - name: 重命名 APK
         run: |
-          VERSION="2.4.0"  # 从git tag获取更佳
+          VERSION="2.4.0"
           if [ -d ".git" ]; then
             VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
           fi
-          ls -la build/app/outputs/flutter-apk/*.apk || echo "APK not found yet, building may need adjustment"
-          # 重命名
           mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+             build/app/outputs/flutter-apk/speak-reader-${VERSION}-arm64-v8a.apk 2>/dev/null || true
+          # 也尝试 product flavor 路径
+          mv build/app/outputs/flutter-apk/app-arm64-arm64-v8a-release.apk \
              build/app/outputs/flutter-apk/speak-reader-${VERSION}-arm64-v8a.apk 2>/dev/null || true
 
       - name: 上传 APK(Actions Artifact)
@@ -77,8 +113,6 @@ jobs:
           fi
         shell: bash
 
-      # 注：由于是fork仓库且workflow_dispatch手动触发时才可能运行，
-      # softprops/action-gh-release需要有repository_write权限
       - name: 发布到 Releases
         if: steps.check-tag.outputs.is_tag == 'true'
         uses: softprops/action-gh-release@v2
@@ -96,6 +130,5 @@ jobs:
           draft: false
           prerelease: false
 
-      # Post步骤：清理
       - name: 清理
         run: echo "done"
