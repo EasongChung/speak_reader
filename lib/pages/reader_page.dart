@@ -8,7 +8,7 @@ import '../services/tts_service.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_service.dart';
-import '../services/offline_translation_service.dart';
+// [v2.4.0] 移除: offline_translation_service(ML Kit 已删除)
 
 class ReaderPage extends StatefulWidget {
   final Document document;
@@ -23,7 +23,7 @@ class _ReaderPageState extends State<ReaderPage> {
   final _storage = StorageService();
   final _settingsService = SettingsService();
   final _translation = TranslationService();
-  final _offlineTranslation = OfflineTranslationService();
+  // [v2.4.0] 移除: _offlineTranslation
   final _audioExport = AudioExportService();
   final _scrollController = ScrollController();
 
@@ -92,7 +92,7 @@ class _ReaderPageState extends State<ReaderPage> {
   @override
   void dispose() {
     _tts.dispose();
-    _offlineTranslation.dispose();
+    // [v2.4.0] 移除: _offlineTranslation.dispose()
     _scrollController.dispose();
     _editController.dispose();
     super.dispose();
@@ -364,31 +364,16 @@ class _ReaderPageState extends State<ReaderPage> {
     }
 
     // 已配 API 检查
-    if (!_settings.preferOfflineTranslation && !_settings.translationReady) {
-      _toast('请先到「设置」配置翻译 API,或开启「优先离线翻译」');
+    if (!_settings.translationReady) {
+      _toast('请先到「设置」配置翻译 API');
       return;
     }
 
     setState(() => _translating = true);
     try {
-      String? result;
-      if (_settings.preferOfflineTranslation) {
-        try {
-          result = await _offlineTranslation.translate(sentence);
-        } catch (e) {
-          debugPrint('offline translate failed, fallback online: $e');
-          if (_settings.translationReady) {
-            _toast('离线翻译不可用,已改用在线翻译');
-            result = await _translation.translate(sentence, settings: _settings);
-          } else {
-            rethrow;
-          }
-        }
-      } else {
-        result = await _translation.translate(sentence, settings: _settings);
-      }
+      final result = await _translation.translate(sentence, settings: _settings);
       if (mounted) {
-        setState(() => _translations[targetIndex] = result!);
+        setState(() => _translations[targetIndex] = result);
         // [v2.4.0] 同步刷新底部面板 UI
         _sheetRebuild?.call();
       }

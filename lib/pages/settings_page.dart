@@ -229,20 +229,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const Divider(height: 40),
 
-          // ================= 翻译方式 =================
-          _sectionTitle('翻译方式'),
-          SwitchListTile(
-            title: const Text('优先离线翻译'),
-            subtitle: const Text('用设备内 ML Kit 离线翻译(首次需联网下载语言模型);'
-                '不可用时自动回退到上面的在线 API'),
-            value: _s.preferOfflineTranslation,
-            onChanged: (v) async {
-              setState(() => _s.preferOfflineTranslation = v);
-              await _persist();
-            },
-            contentPadding: EdgeInsets.zero,
-          ),
-          const Divider(height: 40),
+          // [v2.4.0] 移除: 翻译方式 SwitchListTile(ML Kit 已删除)
 
           _sectionTitle('朗读参数'),
           _slider(

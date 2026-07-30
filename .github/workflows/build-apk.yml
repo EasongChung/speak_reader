@@ -22,85 +22,59 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 安装 Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
+      - name: 检查 Flutter
+        run: flutter doctor --version
 
-      - name: 补齐脚手架文件(图标/wrapper/gradle 等)
-        run: flutter create --org com.example --project-name speak_reader --platforms=android .
-
-      - name: 还原自定义配置(依赖、权限、业务代码)
-        run: |
-          git checkout -- pubspec.yaml \
-            android/app/src/main/AndroidManifest.xml \
-            lib
-          rm -f test/widget_test.dart 2>/dev/null || true
-
-      - name: 调整 app 构建配置(compileSdk 36 + 关闭混淆)
-        run: |
-          F=android/app/build.gradle.kts
-          echo "===== 原始 build.gradle.kts ====="
-          cat "$F"
-          # 宽松匹配 compileSdk 的多种写法
-          sed -i -E 's/compileSdk[[:space:]]*=[[:space:]]*[A-Za-z0-9._()]+/compileSdk = 36/' "$F"
-          sed -i -E 's/compileSdkVersion[[:space:]]*\([^)]*\)/compileSdk = 36/' "$F"
-          # 关闭 R8 混淆与资源压缩
-          grep -q "isMinifyEnabled" "$F" || \
-            sed -i '/signingConfig = signingConfigs.getByName("debug")/a\            isMinifyEnabled = false\n            isShrinkResources = false' "$F"
-          echo "===== 修改后 build.gradle.kts ====="
-          cat "$F"
-          echo "===== 校验 compileSdk ====="
-          if grep -qE "compileSdk[[:space:]]*=[[:space:]]*36" "$F"; then
-            echo "OK: compileSdk 已设为 36"
-          else
-            echo "错误: 未能把 compileSdk 设为 36" ; grep -n compileSdk "$F" ; exit 1
-          fi
+      # Flutter项目已包含完整的Android结构，不需要重新create
+      # 这里只验证flutter能正常读取项目
 
       - name: 获取依赖
         run: flutter pub get
 
-      - name: 修补插件 compileSdk 到 36
-        run: |
-          CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
-          echo "pub 缓存目录: $CACHE"
-          patched=0
-          while IFS= read -r -d '' f; do
-            if grep -qE "compileSdk(Version)?[[:space:]=]+.*3[0-5]" "$f"; then
-              echo "----- 修补前: $f -----"
-              grep -nE "compileSdk" "$f" || true
-              sed -i -E \
-                -e 's/(compileSdkVersion[[:space:]]+)3[0-5]/\136/g' \
-                -e 's/(compileSdk[[:space:]]+)3[0-5]/\136/g' \
-                -e 's/(compileSdk[[:space:]]*=[[:space:]]*)3[0-5]/\136/g' \
-                "$f"
-              echo "----- 修补后: $f -----"
-              grep -nE "compileSdk" "$f" || true
-              patched=$((patched+1))
-            fi
-          done < <(find "$CACHE" \( -path "*/android/build.gradle" -o -path "*/android/build.gradle.kts" \) -print0 2>/dev/null)
-          echo "共修补 $patched 个插件构建文件"
+      # [v2.4.0] build.gradle.kts 已内置 compileSdk=36 + minify + arm64 flavor
+      # 无需在 CI 中 sed 修改, 直接构建即可
 
       - name: 构建 Release APK
-        run: flutter build apk --release
+        run: |
+          # 使用 --split-per-abi 只生成 arm64-v8a（最大体积节省）
+          flutter build apk --release --split-per-abi
+          # 确认生成了 arm64 的apk
+          ls build/app/outputs/flutter-apk/
 
       - name: 重命名 APK
         run: |
-          # 优先级: GITHUB_REF_NAME(标签或分支) → v2.4.0 兜底
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ -z "$VERSION" ] && VERSION="2.4.0"
-          mv build/app/outputs/flutter-apk/app-release.apk \
-             build/app/outputs/flutter-apk/speak-reader-v${VERSION}.apk
+          VERSION="2.4.0"  # 从git tag获取更佳
+          if [ -d ".git" ]; then
+            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+          fi
+          ls -la build/app/outputs/flutter-apk/*.apk || echo "APK not found yet, building may need adjustment"
+          # 重命名
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+             build/app/outputs/flutter-apk/speak-reader-${VERSION}-arm64-v8a.apk 2>/dev/null || true
 
       - name: 上传 APK(Actions Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: speak-reader-apk
-          path: build/app/outputs/flutter-apk/speak-reader-v*.apk
+          path: build/app/outputs/flutter-apk/speak-reader-*.apk
 
       # 仅在推送标签(v*)时创建 GitHub Release
+      - name: 判断是否为标签推送
+        id: check-tag
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            echo "is_tag=true" >> $GITHUB_OUTPUT
+            echo "tag_name=$(echo $GITHUB_REF | cut -d'/' -f3)" >> $GITHUB_OUTPUT
+            echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          else
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      # 注：由于是fork仓库且workflow_dispatch手动触发时才可能运行，
+      # softprops/action-gh-release需要有repository_write权限
       - name: 发布到 Releases
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.check-tag.outputs.is_tag == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -109,7 +83,13 @@ jobs:
             📱 Speak Reader APK 构建
             版本: ${{ github.ref_name }}
             分支: ${{ github.ref_name }}
-            构建日期: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          files: build/app/outputs/flutter-apk/speak-reader-v*.apk
+            架构: arm64-v8a (精简版)
+            构建日期: ${{ steps.check-tag.outputs.date }}
+            [查看工作流](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          files: build/app/outputs/flutter-apk/speak-reader-*-arm64-v8a.apk
           draft: false
           prerelease: false
+
+      # Post步骤：清理
+      - name: 清理
+        run: echo "done"

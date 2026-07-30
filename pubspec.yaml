@@ -1,7 +1,7 @@
 name: speak_reader
 description: 语音朗读导入 App —— 拍照/扫描/Word/PDF/TXT 导入并语音朗读
 publish_to: 'none'
-version: 2.3.0+1
+version: 2.4.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -24,8 +24,8 @@ dependencies:
   # Word(.docx)转文本
   docx_to_text: ^1.0.1
 
-  # PDF 文本提取
-  syncfusion_flutter_pdf: ^27.1.48
+  # PDF 文本提取(轻量替代,基于 pdfium,无 Syncfusion 原生代码膨胀)
+  pdfx: ^2.6.0
 
   # 运行时权限
   permission_handler: ^11.3.1
@@ -44,9 +44,7 @@ dependencies:
   # 又需 <12.0.0 避免强制 AGP>=8.12/Kotlin2.2 拖累 CI。
   share_plus: ^10.1.0
 
-  # 离线翻译(Google ML Kit,首次需联网下载语言模型,之后离线)
-  google_mlkit_translation: ^0.13.0
-  google_mlkit_language_id: ^0.13.0
+  # [v2.4.0] 移除: google_mlkit_translation/google_mlkit_language_id (~15MB,国产机不可用)
 
 dev_dependencies:
   flutter_lints: ^4.0.0

@@ -1,0 +1,10 @@
+# 统一处理换行符，避免构建时因 CRLF/LF 差异导致 gradle 脚本解析错误
+*.kt diff=linguist-kts
+*.gradle*.kts diff=linguist-gradle
+*.xml diff=eol
+*.html diff=eol
+*.sh diff=eol
+# Flutter 工程文件无需特殊处理
+*.dart eol=lf
+*.yaml eol=lf
+*.md eol=lf

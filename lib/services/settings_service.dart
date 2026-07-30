@@ -20,8 +20,7 @@ class AppSettings {
   String apiKey;
   String model;
 
-  // 翻译:优先离线(ML Kit),不可用时自动回退在线 API
-  bool preferOfflineTranslation;
+  // [v2.4.0] 移除: preferOfflineTranslation(ML Kit 已删除,纯在线翻译)
 
   // 朗读参数
   double wordGapSeconds; // 词间间隔(秒)
@@ -41,7 +40,7 @@ class AppSettings {
     this.baseUrl = 'https://api.openai.com/v1',
     this.apiKey = '',
     this.model = 'gpt-4o-mini',
-    this.preferOfflineTranslation = true,
+    // [v2.4.0] 移除 preferOfflineTranslation
     this.wordGapSeconds = 0.3,
     this.repeatCount = 2,
     this.dictationGapSeconds = 2.0,
@@ -61,7 +60,7 @@ class SettingsService {
   static const _kBaseUrl = 'cfg_base_url';
   static const _kApiKey = 'cfg_api_key';
   static const _kModel = 'cfg_model';
-  static const _kPreferOfflineTr = 'cfg_prefer_offline_tr';
+  // [v2.4.0] 移除: _kPreferOfflineTr
   static const _kWordGap = 'cfg_word_gap';
   static const _kRepeat = 'cfg_repeat';
   static const _kDictGap = 'cfg_dict_gap';
@@ -80,7 +79,7 @@ class SettingsService {
       baseUrl: p.getString(_kBaseUrl) ?? def.baseUrl,
       apiKey: p.getString(_kApiKey) ?? def.apiKey,
       model: p.getString(_kModel) ?? def.model,
-      preferOfflineTranslation: p.getBool(_kPreferOfflineTr) ?? def.preferOfflineTranslation,
+      // [v2.4.0] 移除: preferOfflineTranslation
       wordGapSeconds: p.getDouble(_kWordGap) ?? def.wordGapSeconds,
       repeatCount: p.getInt(_kRepeat) ?? def.repeatCount,
       dictationGapSeconds: p.getDouble(_kDictGap) ?? def.dictationGapSeconds,
@@ -99,7 +98,7 @@ class SettingsService {
     await p.setString(_kBaseUrl, s.baseUrl.trim());
     await p.setString(_kApiKey, s.apiKey.trim());
     await p.setString(_kModel, s.model.trim());
-    await p.setBool(_kPreferOfflineTr, s.preferOfflineTranslation);
+    // [v2.4.0] 移除: _kPreferOfflineTr
     await p.setDouble(_kWordGap, s.wordGapSeconds);
     await p.setInt(_kRepeat, s.repeatCount);
     await p.setDouble(_kDictGap, s.dictationGapSeconds);

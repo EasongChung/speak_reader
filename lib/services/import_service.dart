@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'package:docx_to_text/docx_to_text.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart';
+import 'package:pdfx/pdfx.dart';
 
 import '../models/document.dart';
 
@@ -46,25 +46,33 @@ class ImportService {
   }
 
   Future<String> _readPdf(File file) async {
-    final bytes = await file.readAsBytes();
-    PdfDocument document;
     try {
-      document = PdfDocument(inputBytes: bytes);
-    } catch (e) {
-      throw Exception('无法打开该 PDF:$e');
-    }
-    try {
-      final extractor = PdfTextExtractor(document);
-      final text = extractor.extractText().trim();
-      if (text.isEmpty) {
-        // 扫描件/图片版 PDF 没有文本层,提取不到文字
-        throw Exception(
-            '该 PDF 可能是扫描件(图片版),没有可提取的文字层。\n'
-            '建议:把 PDF 页面截图后用「拍照/相册」导入做文字识别。');
+      final document = await PdfDocument.openFile(file.path);
+      try {
+        final pageCount = await document.getPagesCount();
+        if (pageCount == 0) throw Exception('PDF 为空');
+        final sb = StringBuffer();
+        for (int i = 1; i <= pageCount; i++) {
+          final page = await document.getPage(i);
+          try {
+            sb.writeln(await page.getText());
+          } finally {
+            await page.close();
+          }
+        }
+        final text = sb.toString().trim();
+        if (text.isEmpty) {
+          throw Exception(
+              '该 PDF 可能是扫描件(图片版),没有可提取的文字层。\n'
+              '建议:把 PDF 页面截图后用「拍照/相册」导入做文字识别。');
+        }
+        return text;
+      } finally {
+        await document.close();
       }
-      return text;
-    } finally {
-      document.dispose();
+    } catch (e) {
+      if (e is Exception) rethrow;
+      throw Exception('无法打开该 PDF:$e');
     }
   }
 

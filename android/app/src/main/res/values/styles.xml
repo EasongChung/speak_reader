@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 启动闪屏主题 -->
-<resources>
-    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
-        <item name="android:windowBackground">@drawable/launch_background</item>
-    </style>
-    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
-    </style>
-</resources>
+<!-- 启动闪屏主题（极简，避免白色背景闪烁） -->
+<style name="LaunchTheme" parent="@android:style/Theme.NoTitleBar">
+    <item name="android:windowBackground">@drawable/launch_background</item>
+    <!-- 快速淡入，避免白屏过久 -->
+    <item name="android:windowContentTransitions">true</item>
+    <item name="android:windowEnterTransition">@android:fade_in</item>
+</style>
+
+<style name="NormalTheme" parent="MaterialComponents.DayNight.NoActionBar">
+    <item name="android:windowBackground">?attr/colorSurface</item>
+</style>
