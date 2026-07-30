@@ -54,6 +54,8 @@ jobs:
           git checkout android/app/src/main/
           git checkout android/app/build-optimizations.gradle
           git checkout android/app/proguard-rules.pro
+          # 升级 Kotlin 版本（flutter_tts 要求较新版本，flutter create 生成的 1.7.10 太旧）
+          sed -i 's/org.jetbrains.kotlin.android" version "[^"]*"/org.jetbrains.kotlin.android" version "1.9.22"/' android/settings.gradle
           # 追加体积优化配置
           cat android/app/build-optimizations.gradle >> android/app/build.gradle
           echo "===== 注入后的 app/build.gradle ====="
