@@ -31,46 +31,65 @@ jobs:
         run: flutter doctor --version
 
       # ============================================================
-      # 备份自定义配置 → 临时目录 flutter create 生成完整 Android 脚手架
-      # → 复制到项目 → 恢复自定义配置
+      # 用 flutter create 在临时目录生成完整 Android 脚手架
+      # 复制到项目后，用 sed 在 app/build.gradle 上追加优化配置
+      # 这样 Flutter 的校验 100% 通过（因为 build.gradle 是标准格式）
       # ============================================================
-      - name: 备份自定义 Android 配置
-        run: |
-          mkdir -p /tmp/android-bak
-          cp android/app/build.gradle.kts /tmp/android-bak/
-          cp android/app/src/main/res/values/styles.xml /tmp/android-bak/
-          cp android/app/src/main/AndroidManifest.xml /tmp/android-bak/ 2>/dev/null || true
-          cp android/app/proguard-rules.pro /tmp/android-bak/ 2>/dev/null || true
-
       - name: 生成标准 Android 脚手架
         run: |
-          # 在临时目录创建完整 Flutter 项目以获取标准 android/ 目录
           TMPDIR=$(mktemp -d)
           cd "$TMPDIR"
           flutter create --org com.example --project-name speak_reader --platforms=android . 2>&1
-          # 删除项目级 KTS 文件(避免与 Groovy 文件冲突)
-          rm -f "$TMPDIR/android/build.gradle.kts" "$TMPDIR/android/settings.gradle.kts"
-          # 复制整个 android/ 目录回项目(覆盖所有手写文件)
           cd "$OLDPWD"
           rm -rf android/
           cp -r "$TMPDIR/android" .
           chmod +x android/gradlew
           rm -rf "$TMPDIR"
-          echo "===== 生成的标准文件 ====="
+          echo "===== 标准 Gradle 结构 ====="
           ls -la android/ android/app/
 
-      - name: 恢复自定义配置
+      - name: 恢复自定义资源 + 注入优化配置
         run: |
-          cp /tmp/android-bak/build.gradle.kts android/app/build.gradle.kts
-          cp /tmp/android-bak/styles.xml android/app/src/main/res/values/styles.xml
-          cp /tmp/android-bak/AndroidManifest.xml android/app/src/main/AndroidManifest.xml 2>/dev/null || true
-          cp /tmp/android-bak/proguard-rules.pro android/app/proguard-rules.pro 2>/dev/null || true
-          # 删除生成的 app 级 Groovy build.gradle(我们的 KTS 优先)
-          rm -f android/app/build.gradle
-          echo "===== 恢复后的结构 ====="
-          ls -la android/ android/app/
-          echo "----- app/build.gradle or kts? -----"
-          ls android/app/build.gradle* 2>/dev/null || echo "no build.gradle*"
+          # 恢复自定义的资源文件（styles.xml, AndroidManifest.xml, proguard, drawable 等）
+          git checkout android/app/src/main/
+          # 在 app/build.gradle（Groovy）末尾追加优化配置
+          cat >> android/app/build.gradle << 'EOF'
+
+// =================== [v2.4.0] 体积优化 ===================
+// 以下为 speak_reader 项目自定义优化配置
+android {
+    defaultConfig {
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+    buildTypes.release {
+        minifyEnabled true
+        shrinkResources true
+        proguardFiles(
+            getDefaultProguardFile("proguard-android-optimize.txt"),
+            "proguard-rules.pro"
+        )
+    }
+    packagingOptions {
+        excludes += [
+            "META-INF/DEPENDENCIES",
+            "META-INF/LICENSE",
+            "META-INF/LICENSE.txt",
+            "META-INF/license.txt",
+            "META-INF/NOTICE",
+            "META-INF/NOTICE.txt",
+            "META-INF/notice.txt",
+            "META-INF/ASL2.0",
+            "META-INF/*.list",
+            "META-INF/*.SF",
+            "META-INF/*.RSA",
+        ]
+    }
+}
+EOF
+          echo "===== 注入后的 app/build.gradle ====="
+          cat android/app/build.gradle
 
       - name: 获取依赖
         run: flutter pub get
@@ -86,8 +105,6 @@ jobs:
           if [ -d ".git" ]; then
             VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
           fi
-          # --split-per-abi 生成 app-arm64-v8a-release.apk
-          # 若有 product flavor 则生成 app-arm64-arm64-v8a-release.apk
           for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
             [ -f "$apk" ] || continue
             base=$(basename "$apk" | sed 's/^app-//; s/-release.apk$//')
