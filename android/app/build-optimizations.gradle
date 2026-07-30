@@ -1,0 +1,32 @@
+// =================== [v2.4.0] 体积优化 ===================
+// 以下为 speak_reader 项目自定义优化配置，CI 构建时自动追加到 app/build.gradle
+android {
+    defaultConfig {
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+    buildTypes.release {
+        minifyEnabled true
+        shrinkResources true
+        proguardFiles(
+            getDefaultProguardFile("proguard-android-optimize.txt"),
+            "proguard-rules.pro"
+        )
+    }
+    packagingOptions {
+        excludes += [
+            "META-INF/DEPENDENCIES",
+            "META-INF/LICENSE",
+            "META-INF/LICENSE.txt",
+            "META-INF/license.txt",
+            "META-INF/NOTICE",
+            "META-INF/NOTICE.txt",
+            "META-INF/notice.txt",
+            "META-INF/ASL2.0",
+            "META-INF/*.list",
+            "META-INF/*.SF",
+            "META-INF/*.RSA",
+        ]
+    }
+}

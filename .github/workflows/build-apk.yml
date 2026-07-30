@@ -31,9 +31,9 @@ jobs:
         run: flutter doctor --version
 
       # ============================================================
-      # 用 flutter create 在临时目录生成完整 Android 脚手架
-      # 复制到项目后，用 sed 在 app/build.gradle 上追加优化配置
-      # 这样 Flutter 的校验 100% 通过（因为 build.gradle 是标准格式）
+      # flutter create 生成标准 Groovy Android 脚手架
+      # 恢复自定义资源后，追加 build-optimizations.gradle 到 app/build.gradle
+      # 确保 Flutter 校验 100% 通过（标准 Groovy 格式）
       # ============================================================
       - name: 生成标准 Android 脚手架
         run: |
@@ -50,44 +50,9 @@ jobs:
 
       - name: 恢复自定义资源 + 注入优化配置
         run: |
-          # 恢复自定义的资源文件（styles.xml, AndroidManifest.xml, proguard, drawable 等）
           git checkout android/app/src/main/
-          # 在 app/build.gradle（Groovy）末尾追加优化配置
-          cat >> android/app/build.gradle << 'EOF'
-
-// =================== [v2.4.0] 体积优化 ===================
-// 以下为 speak_reader 项目自定义优化配置
-android {
-    defaultConfig {
-        ndk {
-            abiFilters "arm64-v8a"
-        }
-    }
-    buildTypes.release {
-        minifyEnabled true
-        shrinkResources true
-        proguardFiles(
-            getDefaultProguardFile("proguard-android-optimize.txt"),
-            "proguard-rules.pro"
-        )
-    }
-    packagingOptions {
-        excludes += [
-            "META-INF/DEPENDENCIES",
-            "META-INF/LICENSE",
-            "META-INF/LICENSE.txt",
-            "META-INF/license.txt",
-            "META-INF/NOTICE",
-            "META-INF/NOTICE.txt",
-            "META-INF/notice.txt",
-            "META-INF/ASL2.0",
-            "META-INF/*.list",
-            "META-INF/*.SF",
-            "META-INF/*.RSA",
-        ]
-    }
-}
-EOF
+          # 追加体积优化配置（从独立文件读取，避免 YAML heredoc 解析问题）
+          cat android/app/build-optimizations.gradle >> android/app/build.gradle
           echo "===== 注入后的 app/build.gradle ====="
           cat android/app/build.gradle
 
