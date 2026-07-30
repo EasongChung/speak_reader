@@ -22,6 +22,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+
       - name: 检查 Flutter
         run: flutter doctor --version
 
