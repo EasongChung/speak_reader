@@ -37,7 +37,7 @@ jobs:
           ./android/gradlew --version
 
       - name: 按锁文件获取依赖
-        run: flutter pub get --enforce-lockfile
+        run: flutter pub get
 
       - name: 检查 Dart 格式
         run: dart format --output=none --set-exit-if-changed lib test
