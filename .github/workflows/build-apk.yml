@@ -50,8 +50,11 @@ jobs:
 
       - name: 恢复自定义资源 + 注入优化配置
         run: |
+          # 恢复被 rm -rf android/ 删除的自定义文件（不包含 build.gradle 等脚手架文件）
           git checkout android/app/src/main/
-          # 追加体积优化配置（从独立文件读取，避免 YAML heredoc 解析问题）
+          git checkout android/app/build-optimizations.gradle
+          git checkout android/app/proguard-rules.pro
+          # 追加体积优化配置
           cat android/app/build-optimizations.gradle >> android/app/build.gradle
           echo "===== 注入后的 app/build.gradle ====="
           cat android/app/build.gradle
