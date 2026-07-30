@@ -54,9 +54,10 @@ jobs:
           git checkout android/app/src/main/
           git checkout android/app/build-optimizations.gradle
           git checkout android/app/proguard-rules.pro
-          # 升级 Kotlin + AGP 版本（flutter_tts 4.2.5 用 Kotlin 2.2 编译，需匹配）
+          # 升级 Kotlin + AGP + Gradle 版本（flutter_tts 4.2.5 用 Kotlin 2.2 编译，需匹配）
           sed -i 's/org.jetbrains.kotlin.android" version "[^"]*"/org.jetbrains.kotlin.android" version "2.2.0"/' android/settings.gradle
           sed -i 's/com.android.application" version "[^"]*"/com.android.application" version "8.7.0"/' android/settings.gradle
+          sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.9-all.zip|' android/gradle/wrapper/gradle-wrapper.properties
           # 追加体积优化配置
           cat android/app/build-optimizations.gradle >> android/app/build.gradle
           echo "===== 注入后的 app/build.gradle ====="
