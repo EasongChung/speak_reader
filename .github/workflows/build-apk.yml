@@ -1,14 +1,17 @@
-name: Build Android APK
+name: Build Android APK & Release
 
-# 手动触发,或推送到 main 分支时自动打包
+# 手动触发、推送到 main 分支，或推送 v 标签时自动打包
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 发布 Release 需要写入权限
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -39,10 +42,10 @@ jobs:
           F=android/app/build.gradle.kts
           echo "===== 原始 build.gradle.kts ====="
           cat "$F"
-          # 宽松匹配 compileSdk 的多种写法(= 34 / = flutter.compileSdkVersion / 函数式)
+          # 宽松匹配 compileSdk 的多种写法
           sed -i -E 's/compileSdk[[:space:]]*=[[:space:]]*[A-Za-z0-9._()]+/compileSdk = 36/' "$F"
           sed -i -E 's/compileSdkVersion[[:space:]]*\([^)]*\)/compileSdk = 36/' "$F"
-          # 关闭 R8 混淆与资源压缩(避免 ML Kit 类缺失);已存在则不重复插入
+          # 关闭 R8 混淆与资源压缩
           grep -q "isMinifyEnabled" "$F" || \
             sed -i '/signingConfig = signingConfigs.getByName("debug")/a\            isMinifyEnabled = false\n            isShrinkResources = false' "$F"
           echo "===== 修改后 build.gradle.kts ====="
@@ -57,13 +60,11 @@ jobs:
       - name: 获取依赖
         run: flutter pub get
 
-      - name: 修补插件 compileSdk 到 36(直接改 pub 缓存里的插件)
+      - name: 修补插件 compileSdk 到 36
         run: |
           CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
           echo "pub 缓存目录: $CACHE"
           patched=0
-          # 遍历所有插件的 android 构建文件(.gradle 与 .gradle.kts),
-          # 把写死的 compileSdk 30~35 统一提升到 36。直接改源文件,不受 gradle 评估时机影响。
           while IFS= read -r -d '' f; do
             if grep -qE "compileSdk(Version)?[[:space:]=]+.*3[0-5]" "$f"; then
               echo "----- 修补前: $f -----"
@@ -83,8 +84,32 @@ jobs:
       - name: 构建 Release APK
         run: flutter build apk --release
 
-      - name: 上传 APK
+      - name: 重命名 APK
+        run: |
+          # 优先级: GITHUB_REF_NAME(标签或分支) → v2.4.0 兜底
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ -z "$VERSION" ] && VERSION="2.4.0"
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/speak-reader-v${VERSION}.apk
+
+      - name: 上传 APK(Actions Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: speak-reader-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/speak-reader-v*.apk
+
+      # 仅在推送标签(v*)时创建 GitHub Release
+      - name: 发布到 Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Speak Reader ${{ github.ref_name }}
+          body: |
+            📱 Speak Reader APK 构建
+            版本: ${{ github.ref_name }}
+            分支: ${{ github.ref_name }}
+            构建日期: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: build/app/outputs/flutter-apk/speak-reader-v*.apk
+          draft: false
+          prerelease: false

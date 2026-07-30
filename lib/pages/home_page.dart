@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
@@ -73,7 +75,10 @@ class _HomePageState extends State<HomePage> {
         maxHeight: 2200,
       );
       if (shot == null) return;
-      await _runOcr(shot.path, DocSource.camera);
+      // [v2.4.0] 保存原始文件到私有目录
+      final origPath = await _saveOriginalFile(shot.path, 'jpg');
+      await _runOcr(shot.path, DocSource.camera,
+          originalPath: origPath, originalFileMime: 'image/jpeg');
     } catch (e) {
       _toast('拍照失败:$e');
     }
@@ -88,13 +93,24 @@ class _HomePageState extends State<HomePage> {
         maxHeight: 2200,
       );
       if (img == null) return;
-      await _runOcr(img.path, DocSource.gallery);
+      // [v2.4.0] 保存原始文件到私有目录
+      final ext = img.path.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
+      final mime = ext == 'png' ? 'image/png' : 'image/jpeg';
+      final origPath = await _saveOriginalFile(img.path, ext);
+      await _runOcr(img.path, DocSource.gallery,
+          originalPath: origPath, originalFileMime: mime);
     } catch (e) {
       _toast('选图失败:$e');
     }
   }
 
-  Future<void> _runOcr(String path, DocSource source) async {
+  Future<void> _runOcr(
+    String path,
+    DocSource source, {
+    // [v2.4.0] 原文文件信息（可选参数，向下兼容）
+    String? originalPath,
+    String? originalFileMime,
+  }) async {
     _setLoading(true);
     try {
       final settings = await _settingsService.load();
@@ -111,6 +127,9 @@ class _HomePageState extends State<HomePage> {
         title: source == DocSource.camera ? '拍照识别' : '相册识别',
         content: text,
         source: source,
+        // [v2.4.0] 传递原文文件信息
+        originalFilePath: originalPath,
+        originalFileMime: originalFileMime,
       );
       await _openAndSave(doc);
     } catch (e) {
@@ -130,6 +149,13 @@ class _HomePageState extends State<HomePage> {
       if (path == null) return;
 
       _setLoading(true);
+      // [v2.4.0] PDF 导入时保存原始文件
+      String? origPath;
+      String? origMime;
+      if (path.toLowerCase().endsWith('.pdf')) {
+        origPath = await _saveOriginalFile(path, 'pdf');
+        origMime = 'application/pdf';
+      }
       final imported = await _import.importFile(path);
       if (imported.content.trim().isEmpty) {
         _toast('文档中没有可朗读的文字');
@@ -139,6 +165,9 @@ class _HomePageState extends State<HomePage> {
         title: imported.title,
         content: imported.content,
         source: imported.source,
+        // [v2.4.0] 传递原文文件信息
+        originalFilePath: origPath,
+        originalFileMime: origMime,
       );
       await _openAndSave(doc);
     } catch (e) {
@@ -152,6 +181,9 @@ class _HomePageState extends State<HomePage> {
     required String title,
     required String content,
     required DocSource source,
+    // [v2.4.0] 原文文件信息（可选参数）
+    String? originalFilePath,
+    String? originalFileMime,
   }) {
     final now = DateTime.now();
     return Document(
@@ -160,7 +192,17 @@ class _HomePageState extends State<HomePage> {
       content: content,
       source: source,
       createdAt: now.millisecondsSinceEpoch,
+      originalFilePath: originalFilePath,
+      originalFileMime: originalFileMime,
     );
+  }
+
+  // [v2.4.0] 保存原始文件副本到应用私有目录，返回目标路径
+  Future<String> _saveOriginalFile(String sourcePath, String ext) async {
+    final dir = await _storage.getOriginalsDir();
+    final destPath = '${dir.path}/${DateTime.now().microsecondsSinceEpoch}.$ext';
+    await File(sourcePath).copy(destPath);
+    return destPath;
   }
 
   Future<void> _openAndSave(Document doc) async {

@@ -33,9 +33,14 @@ class _ReaderPageState extends State<ReaderPage> {
   int _currentToken = -1;
   TtsState _state = TtsState.stopped;
   bool _editing = false;
+  // [v2.4.0] 原文模式: 有原始图片时默认 true
+  bool _originalMode = false;
   bool _translating = false;
   bool _exporting = false;
-  String? _translated; // 译文(为 null 时不显示)
+  // [v2.4.0] 句子折叠翻译: 已展开译文的 token index → 译文文本
+  final Map<int, String> _translations = {};
+  // [v2.4.0] 底部文本面板的刷新回调(StatefulBuilder setSheet)
+  VoidCallback? _sheetRebuild;
   late TextEditingController _editController;
 
   final _tokenKeys = <int, GlobalKey>{};
@@ -59,6 +64,10 @@ class _ReaderPageState extends State<ReaderPage> {
     };
 
     _init();
+    // [v2.4.0] 有原始图片时默认进入原文模式
+    if (_doc.isImageOriginal) {
+      _originalMode = true;
+    }
   }
 
   Future<void> _init() async {
@@ -129,6 +138,7 @@ class _ReaderPageState extends State<ReaderPage> {
       _tts.setModeAndText(v, _doc.content);
       _currentToken = -1;
       _tokenKeys.clear();
+      _translations.clear(); // [v2.4.0] 切换模式时译文索引失效
     });
   }
 
@@ -328,38 +338,60 @@ class _ReaderPageState extends State<ReaderPage> {
 
   // ---------------- 翻译 ----------------
 
+  /// [v2.4.0] 翻译当前高亮句子,在本句下方折叠展开/收起译文
   Future<void> _translate() async {
-    final text = _doc.content.trim();
-    if (text.isEmpty) {
+    // 确定要翻译的句子索引: 优先高亮,否则第一句
+    int? targetIndex;
+    if (_currentToken >= 0 && _currentToken < _tts.tokens.length) {
+      targetIndex = _currentToken;
+    }
+    if (targetIndex == null && _tts.tokens.isNotEmpty) {
+      targetIndex = 0;
+    }
+    if (targetIndex == null || _tts.tokens[targetIndex].trim().isEmpty) {
       _toast('没有可翻译的内容');
       return;
     }
-    // 若既不优先离线、又没配在线 API,直接提示
+
+    final sentence = _tts.tokens[targetIndex];
+
+    // 已展开 → 折叠(收起译文)
+    if (_translations.containsKey(targetIndex)) {
+      setState(() => _translations.remove(targetIndex));
+      // [v2.4.0] 同步刷新底部面板
+      _sheetRebuild?.call();
+      return;
+    }
+
+    // 已配 API 检查
     if (!_settings.preferOfflineTranslation && !_settings.translationReady) {
       _toast('请先到「设置」配置翻译 API,或开启「优先离线翻译」');
       return;
     }
+
     setState(() => _translating = true);
     try {
       String? result;
-      // 1) 优先离线(ML Kit),失败再回退在线
       if (_settings.preferOfflineTranslation) {
         try {
-          result = await _offlineTranslation.translate(text);
+          result = await _offlineTranslation.translate(sentence);
         } catch (e) {
           debugPrint('offline translate failed, fallback online: $e');
           if (_settings.translationReady) {
             _toast('离线翻译不可用,已改用在线翻译');
-            result = await _translation.translate(text, settings: _settings);
+            result = await _translation.translate(sentence, settings: _settings);
           } else {
-            rethrow; // 没有在线兜底,把离线的错误抛给用户
+            rethrow;
           }
         }
       } else {
-        // 2) 直接在线
-        result = await _translation.translate(text, settings: _settings);
+        result = await _translation.translate(sentence, settings: _settings);
       }
-      setState(() => _translated = result);
+      if (mounted) {
+        setState(() => _translations[targetIndex] = result!);
+        // [v2.4.0] 同步刷新底部面板 UI
+        _sheetRebuild?.call();
+      }
     } catch (e) {
       _toast('翻译失败:$e');
     } finally {
@@ -375,7 +407,6 @@ class _ReaderPageState extends State<ReaderPage> {
       setState(() {
         _doc.content = _editController.text;
         _editing = false;
-        _translated = null;
       });
       _tts.setText(_doc.content);
       await _storage.upsert(_doc);
@@ -427,47 +458,73 @@ class _ReaderPageState extends State<ReaderPage> {
     return Scaffold(
       appBar: AppBar(
         title: GestureDetector(
-          onTap: _editing ? null : _renameDialog,
+          onTap: (_originalMode || _editing) ? null : _renameDialog,
           child: Text(_doc.title, overflow: TextOverflow.ellipsis),
         ),
-        actions: [
-          if (!_editing) ...[
-            IconButton(
-              icon: const Icon(Icons.library_music),
-              tooltip: '已生成音频',
-              onPressed: _exporting ? null : _showAudioFilesSheet,
-            ),
-            IconButton(
-              icon: _exporting
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.download_for_offline),
-              tooltip: '导出音频',
-              onPressed: _exporting ? null : () => _exportAudio(auto: false),
-            ),
-            IconButton(
-              icon: _translating
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.translate),
-              tooltip: '翻译',
-              onPressed: _translating ? null : _translate,
-            ),
-          ],
-          IconButton(
-            icon: Icon(_editing ? Icons.check : Icons.edit),
-            tooltip: _editing ? '保存' : '编辑文字',
-            onPressed: _toggleEdit,
-          ),
-        ],
+        actions: _buildAppBarActions(),
       ),
-      body: _editing ? _buildEditor() : _buildReader(),
-      bottomNavigationBar: _editing ? null : _buildControls(),
+      body: _originalMode
+          ? _buildOriginalReader()
+          : (_editing ? _buildEditor() : _buildReader()),
+      bottomNavigationBar:
+          _editing ? null : _buildControls(),
     );
+  }
+
+  /// [v2.4.0] 根据模式构建 AppBar 按钮
+  List<Widget> _buildAppBarActions() {
+    if (_originalMode) {
+      // [v2.4.0] 原文模式: 仅「文本模式」切换
+      return [
+        IconButton(
+          icon: const Icon(Icons.text_fields),
+          tooltip: '文本模式',
+          onPressed: () => setState(() => _originalMode = false),
+        ),
+      ];
+    }
+    // 文本模式
+    final actions = <Widget>[
+      if (_doc.hasOriginal && !_editing) // [v2.4.0] 有原文时显示切换按钮
+        IconButton(
+          icon: const Icon(Icons.image),
+          tooltip: '原文',
+          onPressed: () => setState(() => _originalMode = true),
+        ),
+      if (!_editing) ...[
+        IconButton(
+          icon: const Icon(Icons.library_music),
+          tooltip: '已生成音频',
+          onPressed: _exporting ? null : _showAudioFilesSheet,
+        ),
+        IconButton(
+          icon: _exporting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.download_for_offline),
+          tooltip: '导出音频',
+          onPressed: _exporting ? null : () => _exportAudio(auto: false),
+        ),
+        IconButton(
+          icon: _translating
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.translate),
+          tooltip: '翻译',
+          onPressed: _translating ? null : _translate,
+        ),
+      ],
+      IconButton(
+        icon: Icon(_editing ? Icons.check : Icons.edit),
+        tooltip: _editing ? '保存' : '编辑文字',
+        onPressed: _toggleEdit,
+      ),
+    ];
+    return actions;
   }
 
   Widget _buildEditor() {
@@ -486,7 +543,143 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  Widget _buildReader() {
+  // [v2.4.0] 原文阅读模式: 全屏图片(可缩放) + 浮动「查看文本」按钮
+  Widget _buildOriginalReader() {
+    if (_doc.isImageOriginal) {
+      final screenWidth = MediaQuery.of(context).size.width;
+      return Stack(
+        children: [
+          InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 5.0,
+            child: Center(
+              child: Image.file(
+                File(_doc.originalFilePath!),
+                fit: BoxFit.contain,
+                cacheWidth: (screenWidth * 2).toInt(),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 24,
+            child: Center(
+              child: FloatingActionButton.extended(
+                heroTag: 'view_text',
+                icon: const Icon(Icons.text_fields),
+                label: const Text('查看文本'),
+                onPressed: _showTextSheet,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    if (_doc.isPdfOriginal) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.picture_as_pdf, size: 80, color: Colors.red),
+            const SizedBox(height: 16),
+            Text('PDF 原文', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                '此文档为 PDF 格式，无法直接预览。\n请点击下方按钮查看已识别的文字。',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 15,
+                  height: 1.5,
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            FloatingActionButton.extended(
+              heroTag: 'view_text',
+              icon: const Icon(Icons.text_fields),
+              label: const Text('查看文本'),
+              onPressed: _showTextSheet,
+            ),
+          ],
+        ),
+      );
+    }
+    // [v2.4.0] 无原始文件时降级显示
+    return _buildReader();
+  }
+
+  /// [v2.4.0] 底部弹出文本面板: 可点击句子 → 朗读, 点击翻译折叠展开译文
+  void _showTextSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setSheet) {
+          // [v2.4.0] 保存 setSheet 以便翻译完成后刷新面板
+          _sheetRebuild = () {
+            if (mounted) setSheet(() {});
+          };
+          return DraggableScrollableSheet(
+            initialChildSize: 0.55,
+            minChildSize: 0.3,
+            maxChildSize: 0.85,
+            expand: false,
+            builder: (context, scrollController) {
+              return Column(
+                children: [
+                  // 拖拽手柄
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 8),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[400],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.text_fields, size: 18),
+                        const SizedBox(width: 8),
+                        const Text('识别的文字',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        TextButton.icon(
+                          icon: const Icon(Icons.close, size: 18),
+                          label: const Text('关闭'),
+                          onPressed: () {
+                            _sheetRebuild = null;
+                            Navigator.of(context).pop();
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: _buildTokenText(scrollController),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    ).then((_) {
+      // [v2.4.0] 面板关闭后清理引用
+      _sheetRebuild = null;
+    });
+  }
+
+  /// [v2.4.0] 可交互 token 文本: 点击朗读, 点击翻译在本句下方折叠译文
+  Widget _buildTokenText([ScrollController? scrollController]) {
     final tokens = _tts.tokens;
     if (tokens.isEmpty) {
       return const Center(child: Text('没有可朗读的内容'));
@@ -497,64 +690,74 @@ class _ReaderPageState extends State<ReaderPage> {
       color: Theme.of(context).colorScheme.onSurface,
     );
     return SingleChildScrollView(
-      controller: _scrollController,
+      controller: scrollController,
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: 2,
-            runSpacing: 2,
-            children: [
-              for (int i = 0; i < tokens.length; i++)
-                GestureDetector(
-                  onTap: () => _tts.playFrom(i),
-                  child: Container(
-                    key: _tokenKeys.putIfAbsent(i, () => GlobalKey()),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: i == _currentToken
-                          ? Theme.of(context).colorScheme.primary
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      tokens[i],
-                      style: i == _currentToken
-                          ? baseStyle.copyWith(
-                              color: Theme.of(context).colorScheme.onPrimary,
-                              fontWeight: FontWeight.bold)
-                          : baseStyle,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          if (_translated != null) ...[
-            const SizedBox(height: 20),
-            const Divider(),
-            Row(
-              children: [
-                const Icon(Icons.translate, size: 18),
-                const SizedBox(width: 6),
-                const Text('译文',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () => setState(() => _translated = null),
-                ),
-              ],
-            ),
-            SelectableText(
-              _translated!,
-              style: const TextStyle(fontSize: 18, height: 1.7),
-            ),
-          ],
+          for (int i = 0; i < tokens.length; i++)
+            _buildTokenWithTranslation(i, tokens[i], baseStyle),
         ],
       ),
     );
+  }
+
+  /// [v2.4.0] 单个 token 行 + 折叠译文(若有)
+  Widget _buildTokenWithTranslation(int index, String tokenText, TextStyle baseStyle) {
+    final isHighlighted = index == _currentToken;
+    final hasTranslation = _translations.containsKey(index);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: () => _tts.playFrom(index),
+          child: Container(
+            key: _tokenKeys.putIfAbsent(index, () => GlobalKey()),
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+            decoration: BoxDecoration(
+              color: isHighlighted
+                  ? Theme.of(context).colorScheme.primary
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              tokenText,
+              style: isHighlighted
+                  ? baseStyle.copyWith(
+                      color: Theme.of(context).colorScheme.onPrimary,
+                      fontWeight: FontWeight.bold)
+                  : baseStyle,
+            ),
+          ),
+        ),
+        // [v2.4.0] 折叠展开的译文
+        if (hasTranslation)
+          Container(
+            margin: const EdgeInsets.only(top: 4, bottom: 8, left: 4),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              _translations[index]!,
+              style: TextStyle(
+                fontSize: 16,
+                height: 1.5,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildReader() {
+    if (_tts.tokens.isEmpty) {
+      return const Center(child: Text('没有可朗读的内容'));
+    }
+    return _buildTokenText(_scrollController);
   }
 
   Widget _buildControls() {
