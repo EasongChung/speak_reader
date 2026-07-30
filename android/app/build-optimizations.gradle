@@ -10,12 +10,13 @@ android {
         }
     }
     buildTypes.release {
-        minifyEnabled true
-        shrinkResources true
-        proguardFiles(
-            getDefaultProguardFile("proguard-android-optimize.txt"),
-            "proguard-rules.pro"
-        )
+        // [v2.4.0] 暂禁用 minify/shrink 以排查构建失败原因，后续再启用
+        // minifyEnabled true
+        // shrinkResources true
+        // proguardFiles(
+        //     getDefaultProguardFile("proguard-android-optimize.txt"),
+        //     "proguard-rules.pro"
+        // )
     }
     packagingOptions {
         excludes += [
