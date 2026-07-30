@@ -64,7 +64,8 @@ jobs:
 
       - name: 构建 Release APK
         run: |
-          flutter build apk --release --split-per-abi
+          # 注意: 不传 --split-per-abi (与 abiFilters 冲突), abiFilters 已在 build.gradle 中配置
+          flutter build apk --release
           ls build/app/outputs/flutter-apk/
 
       - name: 重命名 APK
@@ -73,11 +74,8 @@ jobs:
           if [ -d ".git" ]; then
             VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
           fi
-          for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
-            [ -f "$apk" ] || continue
-            base=$(basename "$apk" | sed 's/^app-//; s/-release.apk$//')
-            mv "$apk" "build/app/outputs/flutter-apk/speak-reader-${VERSION}-${base}.apk"
-          done
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/speak-reader-${VERSION}-arm64-v8a.apk 2>/dev/null || true
 
       - name: 上传 APK(Actions Artifact)
         uses: actions/upload-artifact@v4
