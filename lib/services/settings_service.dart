@@ -9,7 +9,6 @@ enum AudioFormat {
 
   const AudioFormat(this.label);
   final String label;
-  final String ext = 'wav';
 
   static AudioFormat fromName(String? n) => AudioFormat.values
       .firstWhere((e) => e.name == n, orElse: () => AudioFormat.wav);
@@ -25,7 +24,6 @@ class AppSettings {
   // [v2.4.0] 移除: preferOfflineTranslation(ML Kit 已删除,纯在线翻译)
 
   // 朗读参数
-  double wordGapSeconds; // 词间间隔(秒)
   int repeatCount; // 听写:每词重复遍数(1~10)
   double dictationGapSeconds; // 听写:词间停顿(秒,0.5~10)
   double repeatGapSeconds; // 听写:同一词重复遍数之间的间隔(秒,0~5)
@@ -43,7 +41,6 @@ class AppSettings {
     this.apiKey = '',
     this.model = 'gpt-4o-mini',
     // [v2.4.0] 移除 preferOfflineTranslation
-    this.wordGapSeconds = 0.3,
     this.repeatCount = 2,
     this.dictationGapSeconds = 2.0,
     this.repeatGapSeconds = 0.6,
@@ -64,7 +61,6 @@ class AppSettings {
     String? baseUrl,
     String? apiKey,
     String? model,
-    double? wordGapSeconds,
     int? repeatCount,
     double? dictationGapSeconds,
     double? repeatGapSeconds,
@@ -80,7 +76,6 @@ class AppSettings {
         baseUrl: baseUrl ?? this.baseUrl,
         apiKey: apiKey ?? this.apiKey,
         model: model ?? this.model,
-        wordGapSeconds: wordGapSeconds ?? this.wordGapSeconds,
         repeatCount: repeatCount ?? this.repeatCount,
         dictationGapSeconds: dictationGapSeconds ?? this.dictationGapSeconds,
         repeatGapSeconds: repeatGapSeconds ?? this.repeatGapSeconds,
@@ -101,7 +96,6 @@ class SettingsService {
   static const _kApiKey = 'cfg_api_key';
   static const _kModel = 'cfg_model';
   // [v2.4.0] 移除: _kPreferOfflineTr
-  static const _kWordGap = 'cfg_word_gap';
   static const _kRepeat = 'cfg_repeat';
   static const _kDictGap = 'cfg_dict_gap';
   static const _kRepeatGap = 'cfg_repeat_gap';
@@ -120,7 +114,6 @@ class SettingsService {
       apiKey: p.getString(_kApiKey) ?? def.apiKey,
       model: p.getString(_kModel) ?? def.model,
       // [v2.4.0] 移除: preferOfflineTranslation
-      wordGapSeconds: p.getDouble(_kWordGap) ?? def.wordGapSeconds,
       repeatCount: p.getInt(_kRepeat) ?? def.repeatCount,
       dictationGapSeconds: p.getDouble(_kDictGap) ?? def.dictationGapSeconds,
       repeatGapSeconds: p.getDouble(_kRepeatGap) ?? def.repeatGapSeconds,
@@ -156,7 +149,6 @@ class SettingsService {
     await require(p.setString(_kBaseUrl, s.baseUrl.trim()));
     await require(p.setString(_kApiKey, s.apiKey.trim()));
     await require(p.setString(_kModel, s.model.trim()));
-    await require(p.setDouble(_kWordGap, s.wordGapSeconds));
     await require(p.setInt(_kRepeat, s.repeatCount));
     await require(p.setDouble(_kDictGap, s.dictationGapSeconds));
     await require(p.setDouble(_kRepeatGap, s.repeatGapSeconds));
