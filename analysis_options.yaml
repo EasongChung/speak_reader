@@ -1,0 +1,4 @@
+analyzer:
+  exclude:
+    # 本地固化的上游 pdf_render 1.4.12 补丁包；宿主 App 的 CI 只检查自身源码。
+    - third_party/**

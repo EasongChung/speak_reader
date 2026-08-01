@@ -34,15 +34,17 @@ dependencies:
   flutter_pdfview: 1.4.4
 
   # [v2.5.0] 端侧 GGUF 推理引擎(llama.cpp Dart FFI 绑定)
-  # 选型: llama_cpp_dart 0.2.2 —— 兼容 Flutter 3.22.3/Dart 3.4.4,
+  # 选型: llama_cpp_dart 0.2.2 —— 需 Flutter 3.29.3/Dart 3.7.x,
   # 支持多模态视觉(mtmd/mmproj, Sprint 8 离线 OCR 硬需求),
   # 原生库走 GitHub release 预编译 jni(免 CI 编译 C++, 见 scripts/download_llama_libs.sh)
   llama_cpp_dart: 0.2.2
 
   # [v2.5.0] 扫描版 PDF 逐页渲染为图片(离线 OCR 用, Sprint 8)
-  # 选型: pdf_render 1.4.12 —— 兼容 Dart >=2.17/Flutter >=1.20(与锁定环境兼容),
-  # Android 基于自研渲染器, 无第三方 so, 不拖累 APK 体积
-  pdf_render: 1.4.12
+  # 基于 pdf_render 1.4.12 的本地补丁：上游已维护冻结，Android 插件残留
+  # 已移除的 PluginRegistry.Registrar import，Flutter 3.29 编译会失败。
+  # 补丁副本仅删除该无用 import，保持原有 PDF 渲染实现不变。
+  pdf_render:
+    path: third_party/pdf_render
 
   # [v2.5.0] RGBA → PNG 编码(扫描件 OCR 用)
   # 固定 4.5.4: 跟随 llama_cpp_dart 0.2.2 传递依赖(其约束 image ^4.5.4);
@@ -59,7 +61,11 @@ dependencies:
   http: ^1.2.2
 
   # 文件目录(音频导出输出路径)
-  path_provider: ^2.1.4
+  # 固定 2.1.5，配套 Android 实现锁定为 2.2.16：兼容 Flutter 3.29.3，
+  # 保留 Android V2 PathProviderPlugin 注册，避免解析到仅支持 Flutter 3.35+
+  # 的 path_provider_android 2.3.x。
+  path_provider: 2.1.5
+  path_provider_android: 2.2.16
   # Flutter 3.29.3 的 flutter_test 锁定 path 1.9.1。
   path: 1.9.1
 
