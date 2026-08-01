@@ -41,8 +41,10 @@ dependencies:
   # Android 基于自研渲染器, 无第三方 so, 不拖累 APK 体积
   pdf_render: 1.4.12
 
-  # [v2.5.0] RGBA → PNG 编码(与 llama_cpp_dart 传递依赖 image 4.5.4 一致)
-  image: 4.5.4
+  # [v2.5.0] RGBA → PNG 编码(扫描件 OCR 用)
+  # 固定 4.3.0: 4.4+ 依赖 archive ^4.x, 与 docx_to_text(archive ^3.3.6) 冲突;
+  # 4.3.0 用 archive ^3.6.1 + xml ^6.x, 与 docx_to_text 公共依赖完全兼容(CI 验证)
+  image: 4.3.0
 
   # 运行时权限
   permission_handler: ^11.3.1
