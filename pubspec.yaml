@@ -60,7 +60,8 @@ dependencies:
 
   # 文件目录(音频导出输出路径)
   path_provider: ^2.1.4
-  path: 1.9.0
+  # Flutter 3.29.3 的 flutter_test 锁定 path 1.9.1。
+  path: 1.9.1
 
   # 分享/打开生成的音频文件
   # 需 >=10.0.1 才依赖 web ^1.0.0(与 file_picker 兼容);

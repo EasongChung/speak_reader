@@ -86,7 +86,7 @@ void main() {
     await src.writeAsBytes([1, 2, 3, 4, 5]);
     final managed = await storage.copyOriginal(src.path, 'jpg');
 
-    expect(File(managed).exists(), true);
+    expect(await File(managed).exists(), true);
     final originals = await storage.getOriginalsDir();
     expect(p.equals(p.dirname(managed), originals.path), true);
     // .part 临时文件不应残留(原子写入)
@@ -114,7 +114,7 @@ void main() {
     final after = await storage.delete('a');
     expect(after.length, 1);
     expect(after.single.id, 'b');
-    expect(File(managed).exists(), false); // 原件已删
+    expect(await File(managed).exists(), false); // 原件已删
   });
 
   test('delete 保留仍被其他记录引用的原件', () async {
@@ -125,9 +125,9 @@ void main() {
     await storage.upsert(_doc('b', originalPath: managed));
 
     await storage.delete('a');
-    expect(File(managed).exists(), true); // b 仍引用, 不删
+    expect(await File(managed).exists(), true); // b 仍引用, 不删
     await storage.delete('b');
-    expect(File(managed).exists(), false); // 无引用后删除
+    expect(await File(managed).exists(), false); // 无引用后删除
   });
 
   test('delete 不存在的 id 无副作用', () async {
@@ -159,6 +159,6 @@ void main() {
 
     await storage.clear();
     expect(await storage.loadAll(), isEmpty);
-    expect(File(managed).exists(), false);
+    expect(await File(managed).exists(), false);
   });
 }

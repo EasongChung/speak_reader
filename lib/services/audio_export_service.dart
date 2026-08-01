@@ -103,7 +103,8 @@ class AudioExportService {
             rate: rate, onProgress: onProgress, cancel: cancel);
       }
 
-      return _publish(candidatePath, finalPath);
+      // 必须 await：否则 finally 会先删除 jobDir，使 _publish 的候选 WAV 丢失。
+      return await _publish(candidatePath, finalPath);
     } finally {
       try {
         if (await jobDir.exists()) await jobDir.delete(recursive: true);

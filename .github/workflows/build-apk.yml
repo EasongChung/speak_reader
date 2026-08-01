@@ -23,12 +23,13 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      # [v2.5.0] Flutter 3.22.3 → 3.24.5: SDK meta 锁 1.12.0 → 1.15.0,
-      # 满足 llama_cpp_dart 0.2.2 多模态依赖链 typed_isolate ^6.0.0 → meta ^1.15.0
-      - name: 安装 Flutter 3.24.5
+      # [v2.5.0] Flutter 3.22.3 → 3.29.3: SDK meta 1.16.0 满足
+      # typed_isolate ^6.0.0 → meta ^1.15.0，Dart 3.7 满足
+      # llama_cpp_dart 0.2.2 → ffi ^2.1.4 的 SDK >=3.7.0 约束。
+      - name: 安装 Flutter 3.29.3
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5'
+          flutter-version: '3.29.3'
           channel: stable
           cache: true
 

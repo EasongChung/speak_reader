@@ -437,6 +437,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(width: 12),
               Expanded(
                 child: DropdownButtonFormField<TranslationStrategy>(
+                  // Flutter 3.29 使用 value；新 SDK 建议 initialValue。
+                  // ignore: deprecated_member_use
                   value: _s.translationStrategy,
                   decoration: const InputDecoration(
                       isDense: true, border: OutlineInputBorder()),
@@ -463,7 +465,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
           // ================= [v2.5.0] 本地模型(离线推理) =================
           _sectionTitle('本地模型(离线翻译 / 离线 OCR)'),
-          const Text(
+          Text(
             '在手机安装 GGUF 模型后,即使断网也能离线翻译与图片识别。\n'
             '模型不内置 APK,需自行下载放入:\n'
             '$_modelsDir\n'
@@ -594,6 +596,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(width: 12),
               Expanded(
                 child: DropdownButtonFormField<AudioFormat>(
+                  // Flutter 3.29 使用 value；新 SDK 建议 initialValue。
+                  // ignore: deprecated_member_use
                   value: _s.audioFormat,
                   decoration: const InputDecoration(
                       isDense: true, border: OutlineInputBorder()),

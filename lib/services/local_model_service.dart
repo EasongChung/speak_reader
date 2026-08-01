@@ -34,7 +34,7 @@ class LocalModelService {
   Future<Directory?> _externalAppDir() async {
     try {
       final dirs = await getExternalStorageDirectories();
-      if (dirs.isNotEmpty) return dirs.first;
+      if (dirs != null && dirs.isNotEmpty) return dirs.first;
     } catch (_) {
       // 平台不支持/未实现时回退内部目录
     }
@@ -47,15 +47,15 @@ class LocalModelService {
   /// 或目录中恰好只有一个 `.gguf` 时匹配唯一 `.mmproj`。
   Future<List<LocalModelInfo>> listModels() async {
     final dir = await getModelsDir();
-    final List<File> files;
+    final files = <File>[];
     try {
-      files = await dir
-          .list()
-          .whereType<File>()
-          .where((f) =>
-              p.extension(f.path).toLowerCase() == '.gguf' ||
-              p.extension(f.path).toLowerCase() == '.mmproj')
-          .toList();
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final extension = p.extension(entity.path).toLowerCase();
+        if (extension == '.gguf' || extension == '.mmproj') {
+          files.add(entity);
+        }
+      }
     } catch (_) {
       return const [];
     }

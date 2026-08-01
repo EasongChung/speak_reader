@@ -717,13 +717,14 @@ class _ReaderPageState extends State<ReaderPage> {
             pageFling: false,
             onRender: (pages) {
               if (!mounted) return;
+              final pageCount = pages ?? 0;
               setState(() {
-                _pdfPageCount = pages;
+                _pdfPageCount = pageCount;
                 _pdfReady = true;
               });
               // 超大 PDF 即时提醒(此时 UI 分支会切换为防御提示)
-              if (pages > 200) {
-                _toast('PDF 共 $pages 页，已切换为文本模式');
+              if (pageCount > 200) {
+                _toast('PDF 共 $pageCount 页，已切换为文本模式');
               }
             },
             onError: (error) {
@@ -736,7 +737,7 @@ class _ReaderPageState extends State<ReaderPage> {
             },
             onPageChanged: (page, total) {
               if (!mounted) return;
-              setState(() => _pdfCurrentPage = page);
+              setState(() => _pdfCurrentPage = page ?? _pdfCurrentPage);
             },
             onViewCreated: (vc) {
               _pdfController = vc;

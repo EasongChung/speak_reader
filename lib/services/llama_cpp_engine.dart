@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:llama_cpp_dart/llama_cpp_dart.dart';
 
 import '../models/local_model.dart';
@@ -87,7 +89,7 @@ class LlamaCppEngine implements InferenceEngine {
       throw StateError('当前模型不支持图片识别(缺少 .mmproj)');
     }
     final prompt = _buildOcrPrompt();
-    final images = [LlamaImage.fromFile(imagePath)];
+    final images = [LlamaImage.fromFile(File(imagePath))];
     final result = await parent.sendPromptWithImages(prompt, images);
     return _cleanOutput(result);
   }
