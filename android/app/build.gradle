@@ -64,7 +64,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.speak_reader"
-        minSdk = 21
+        // [v2.5.0] minSdk 21 → 24: 为 llama_cpp_dart(端侧 GGUF) 与 fast_paddle_ocr(离线 OCR) 原生库提升
+        minSdk = 24
         targetSdk = 34
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName

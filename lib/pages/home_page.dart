@@ -6,6 +6,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/document.dart';
+import '../services/llama_cpp_engine.dart';
+import '../services/pdf_ocr_service.dart';
 import '../services/vision_ocr_service.dart';
 import '../services/import_service.dart';
 import '../services/storage_service.dart';
@@ -122,6 +124,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// [v2.5.0] 图片识别: 在线视觉模型优先, 失败/未配置时自动切本地多模态模型兜底。
   Future<void> _runOcr(
     String path,
     DocSource source, {
@@ -130,14 +133,36 @@ class _HomePageState extends State<HomePage> {
   }) async {
     try {
       final settings = await _settingsService.load();
+      final engine = LlamaCppEngine.instance;
+      final hasOnline = settings.translationReady;
+      final hasOffline = engine.isLoaded && engine.canOcr;
       if (!mounted) return;
-      if (!settings.translationReady) {
-        _toast('图片识别需要先到「设置」配置 API(支持视觉的模型,如 gpt-4o、qwen-vl)');
+      if (!hasOnline && !hasOffline) {
+        _toast('图片识别需先到「设置」配置在线 API(支持视觉的模型,如 gpt-4o、qwen-vl),'
+            '或在「本地模型」加载多模态 GGUF 模型离线识别');
         return;
       }
-      final text = await _visionOcr.recognizeFile(path, settings: settings);
+
+      String? text;
+      if (hasOnline) {
+        try {
+          text = await _visionOcr.recognizeFile(path, settings: settings);
+        } catch (e) {
+          if (hasOffline) {
+            _toast('在线识别失败,已切换本地模型识别');
+          } else {
+            rethrow;
+          }
+        }
+      }
+      if (text == null && hasOffline) {
+        if (!mounted) return;
+        _toast('离线识别中…');
+        text = await engine.ocrImage(path);
+      }
+
       if (!mounted) return;
-      if (text.trim().isEmpty) {
+      if (text == null || text.trim().isEmpty) {
         _toast('未识别到文字,请换一张更清晰的图片');
         return;
       }
@@ -145,7 +170,7 @@ class _HomePageState extends State<HomePage> {
       final originalPath = await _storage.copyOriginal(path, originalExtension);
       final doc = _newDoc(
         title: source == DocSource.camera ? '拍照识别' : '相册识别',
-        content: text,
+        content: text.trim(),
         source: source,
         originalFilePath: originalPath,
         originalFileMime: originalFileMime,
@@ -165,30 +190,154 @@ class _HomePageState extends State<HomePage> {
       final path = result?.files.single.path;
       if (path == null || !mounted) return;
 
-      final imported = await _import.importFile(path);
-      if (!mounted) return;
-      if (imported.content.trim().isEmpty) {
-        _toast('文档中没有可朗读的文字');
-        return;
-      }
+      try {
+        final imported = await _import.importFile(path);
+        if (!mounted) return;
+        if (imported.content.trim().isEmpty) {
+          _toast('文档中没有可朗读的文字');
+          return;
+        }
 
-      String? originalPath;
-      String? originalMime;
-      if (path.toLowerCase().endsWith('.pdf')) {
-        originalPath = await _storage.copyOriginal(path, 'pdf');
-        originalMime = 'application/pdf';
+        String? originalPath;
+        String? originalMime;
+        if (path.toLowerCase().endsWith('.pdf')) {
+          originalPath = await _storage.copyOriginal(path, 'pdf');
+          originalMime = 'application/pdf';
+        }
+        final doc = _newDoc(
+          title: imported.title,
+          content: imported.content,
+          source: imported.source,
+          originalFilePath: originalPath,
+          originalFileMime: originalMime,
+        );
+        await _commitAndOpen(doc, rollbackOriginalPath: originalPath);
+      } on PdfHasNoTextLayerException catch (e) {
+        // [v2.5.0] 扫描版 PDF(无文本层): 在线视觉模型优先, 离线多模态兜底
+        if (!mounted) return;
+        final settings = await _settingsService.load();
+        final engine = LlamaCppEngine.instance;
+        if (!settings.translationReady &&
+            (!engine.isLoaded || !engine.canOcr)) {
+          _toast('该 PDF 是扫描件(图片版)。可在「设置」配置在线视觉 API,'
+              '或加载多模态 GGUF 模型后识别;也可把页面截图用「拍照/相册」导入');
+          return;
+        }
+        if (!path.toLowerCase().endsWith('.pdf')) {
+          _toast(e.message);
+          return;
+        }
+        final scannedDoc = await _importScannedPdf(path);
+        if (scannedDoc != null && mounted) {
+          await _commitAndOpen(scannedDoc,
+              rollbackOriginalPath: scannedDoc.originalFilePath);
+        }
       }
-      final doc = _newDoc(
-        title: imported.title,
-        content: imported.content,
-        source: imported.source,
-        originalFilePath: originalPath,
-        originalFileMime: originalMime,
-      );
-      await _commitAndOpen(doc, rollbackOriginalPath: originalPath);
     } catch (e) {
       _toast('导入失败:$e');
     }
+  }
+
+  /// [v2.5.0] 扫描版 PDF 逐页 OCR(在线视觉优先/离线兜底, 进度对话框 + 取消续批)。
+  /// 成功返回生成的文档; 失败/取消返回 null。
+  Future<Document?> _importScannedPdf(String pdfPath) async {
+    final settings = await _settingsService.load();
+    final engine = LlamaCppEngine.instance;
+    final hasOnline = settings.translationReady;
+    final hasOffline = engine.isLoaded && engine.canOcr;
+    if (!mounted) return null;
+    if (!hasOnline && !hasOffline) {
+      _toast('扫描件识别需在线视觉 API,或在「设置 → 本地模型」加载多模态 GGUF 模型');
+      return null;
+    }
+
+    final progress = ValueNotifier<String>('准备识别…');
+    final cancelled = ValueNotifier<bool>(false);
+
+    // [v2.5.0] 在线通道: 每次用最新设置调用在线视觉模型(逐页提交)
+    Future<String> onlineOcr(String imagePath) async {
+      final s = await _settingsService.load();
+      return _visionOcr.recognizeFile(imagePath, settings: s);
+    }
+
+    Future<PdfOcrResult> task() => PdfOcrService().scanPdf(
+          pdfPath,
+          onlineOcr: hasOnline ? onlineOcr : null,
+          offlineEngine: hasOffline ? engine : null,
+          windowSize: 3, // [v2.5.0] 每批 3 页节流, 避免短时间大量提交触发限速
+          onProgress: (recognized, total, failed, channel) {
+            progress.value = failed > 0
+                ? '第 $recognized/$total 页(${channel.label},跳过 $failed 页)…'
+                : '第 $recognized/$total 页(${channel.label})…';
+          },
+          isCancelled: () => cancelled.value,
+        );
+
+    final taskFuture = task();
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('识别扫描版 PDF'),
+          content: ValueListenableBuilder<String>(
+            valueListenable: progress,
+            builder: (_, text, __) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const LinearProgressIndicator(),
+                const SizedBox(height: 12),
+                Text(text),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                cancelled.value = true;
+                progress.value = '正在取消,已识别页会保留,可再次导入续批…';
+              },
+              child: const Text('取消'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    PdfOcrResult? result;
+    String? error;
+    try {
+      result = await taskFuture;
+    } catch (e) {
+      error = '$e';
+    }
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    await dialogFuture;
+
+    if (error != null) {
+      _toast('扫描件识别失败:$error');
+      return null;
+    }
+    if (result == null) return null;
+    if (result.cancelled) {
+      _toast('已取消识别。再次导入同一 PDF 会自动续批'
+          '(已识别 ${result.recognizedPages}/${result.totalPages} 页)');
+      return null;
+    }
+    if (result.text.trim().isEmpty) {
+      _toast('未识别到文字。请确认在线 API 支持图片输入或已加载多模态模型,且页面内容清晰');
+      return null;
+    }
+
+    final originalPath = await _storage.copyOriginal(pdfPath, 'pdf');
+    return _newDoc(
+      title: '扫描件识别',
+      content: result.text.trim(),
+      source: DocSource.pdf,
+      originalFilePath: originalPath,
+      originalFileMime: 'application/pdf',
+    );
   }
 
   Document _newDoc({

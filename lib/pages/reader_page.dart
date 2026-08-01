@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_pdfview/flutter_pdfview.dart';
 
 import '../models/document.dart';
 import '../services/audio_export_service.dart'
     show AudioExportService, CancellationException;
+import '../services/llama_cpp_engine.dart';
 import '../services/tts_service.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
@@ -46,6 +48,12 @@ class _ReaderPageState extends State<ReaderPage> {
   int _contentRevision = 0;
   int _translationRequest = 0;
   late TextEditingController _editController;
+  // [v2.5.0] PDF 原文渲染状态
+  PDFViewController? _pdfController;
+  int _pdfPageCount = 0;
+  int _pdfCurrentPage = 0;
+  bool _pdfReady = false;
+  String? _pdfError;
 
   final _tokenKeys = <int, GlobalKey>{};
 
@@ -108,6 +116,8 @@ class _ReaderPageState extends State<ReaderPage> {
     _tts.onComplete = null;
     _tts.dispose();
     // [v2.4.0] 移除: _offlineTranslation.dispose()
+    // [v2.5.0] PDF 原生视图由组件自行回收, 仅清理状态引用
+    _pdfController = null;
     _scrollController.dispose();
     _editController.dispose();
     super.dispose();
@@ -389,9 +399,19 @@ class _ReaderPageState extends State<ReaderPage> {
       return;
     }
 
-    if (!_settings.translationReady) {
-      _toast('请先到「设置」完整配置翻译 API');
+    // [v2.5.0] 在线/离线双通道前置检查
+    final engine = LlamaCppEngine.instance;
+    final hasOnline = _settings.translationReady;
+    final hasOffline = engine.isLoaded;
+    if (!hasOnline && !hasOffline) {
+      _toast('请先到「设置」配置翻译 API,或在本地模型分区加载 GGUF 模型');
       return;
+    }
+    // 确定走离线通道时给出提示
+    if (hasOffline &&
+        (!hasOnline ||
+            _settings.translationStrategy == TranslationStrategy.offlineOnly)) {
+      _toast('离线翻译中…');
     }
 
     final request = ++_translationRequest;
@@ -518,7 +538,15 @@ class _ReaderPageState extends State<ReaderPage> {
         IconButton(
           icon: const Icon(Icons.image),
           tooltip: '原文',
-          onPressed: () => setState(() => _originalMode = true),
+          onPressed: () => setState(() {
+            _originalMode = true;
+            // [v2.5.0] 重新进入原文模式时重置 PDF 渲染状态(避免残留旧错误/旧页码)
+            _pdfController = null;
+            _pdfPageCount = 0;
+            _pdfCurrentPage = 0;
+            _pdfReady = false;
+            _pdfError = null;
+          }),
         ),
       if (!_editing) ...[
         IconButton(
@@ -606,22 +634,31 @@ class _ReaderPageState extends State<ReaderPage> {
       );
     }
     if (_doc.isPdfOriginal) {
+      return _buildPdfOriginalReader();
+    }
+    // [v2.4.0] 无原始文件时降级显示
+    return _buildReader();
+  }
+
+  /// [v2.5.0] PDF 原文真实渲染(flutter_pdfview): 翻页/缩放/页码/超大文件防御/错误降级
+  Widget _buildPdfOriginalReader() {
+    // 超大 PDF 防御: 页数超过 200 提示改用文本模式, 避免原生渲染卡顿/内存过高
+    if (_pdfPageCount > 200) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Icon(Icons.picture_as_pdf, size: 80, color: Colors.red),
             const SizedBox(height: 16),
-            Text('PDF 原文', style: Theme.of(context).textTheme.titleLarge),
+            Text('PDF 页数过多', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Text(
-                '此文档为 PDF 格式，无法直接预览。\n请点击下方按钮查看已识别的文字。',
+                '此 PDF 共 $_pdfPageCount 页，原样渲染可能卡顿或内存不足。\n建议使用「查看文本」阅读已识别的文字。',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontSize: 15,
                   height: 1.5,
                 ),
               ),
@@ -637,8 +674,115 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
       );
     }
-    // [v2.4.0] 无原始文件时降级显示
-    return _buildReader();
+    // 坏 PDF / 加密 PDF: 渲染失败给出明确错误 + 查看文本降级入口
+    if (_pdfError != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline, size: 80, color: Colors.red),
+            const SizedBox(height: 16),
+            Text('PDF 打开失败', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                _pdfError!,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  height: 1.5,
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            FloatingActionButton.extended(
+              heroTag: 'view_text',
+              icon: const Icon(Icons.text_fields),
+              label: const Text('查看文本'),
+              onPressed: _showTextSheet,
+            ),
+          ],
+        ),
+      );
+    }
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: PDFView(
+            filePath: _doc.originalFilePath!,
+            enableSwipe: true,
+            swipeHorizontal: true,
+            autoSpacing: true,
+            pageFling: false,
+            onRender: (pages) {
+              if (!mounted) return;
+              setState(() {
+                _pdfPageCount = pages;
+                _pdfReady = true;
+              });
+              // 超大 PDF 即时提醒(此时 UI 分支会切换为防御提示)
+              if (pages > 200) {
+                _toast('PDF 共 $pages 页，已切换为文本模式');
+              }
+            },
+            onError: (error) {
+              if (!mounted) return;
+              setState(() => _pdfError = error.toString());
+            },
+            onPageError: (page, error) {
+              // 单页渲染失败(如个别损坏页): 记录日志不打断整体阅读
+              debugPrint('[v2.5.0] PDF 第 $page 页渲染失败: $error');
+            },
+            onPageChanged: (page, total) {
+              if (!mounted) return;
+              setState(() => _pdfCurrentPage = page);
+            },
+            onViewCreated: (vc) {
+              _pdfController = vc;
+            },
+          ),
+        ),
+        // 渲染中: 显示加载指示器
+        if (!_pdfReady) const Center(child: CircularProgressIndicator()),
+        // 底部控制条: 上一页 + 页码(点击查看文本) + 下一页
+        if (_pdfReady)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 24,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'pdf_prev',
+                    onPressed: _pdfCurrentPage > 0
+                        ? () => _pdfController?.setPage(_pdfCurrentPage - 1)
+                        : null,
+                    child: const Icon(Icons.chevron_left),
+                  ),
+                  const SizedBox(width: 12),
+                  FloatingActionButton.extended(
+                    heroTag: 'view_text',
+                    icon: const Icon(Icons.text_fields, size: 18),
+                    label: Text('${_pdfCurrentPage + 1} / $_pdfPageCount'),
+                    onPressed: _showTextSheet,
+                  ),
+                  const SizedBox(width: 12),
+                  FloatingActionButton.small(
+                    heroTag: 'pdf_next',
+                    onPressed: _pdfCurrentPage < _pdfPageCount - 1
+                        ? () => _pdfController?.setPage(_pdfCurrentPage + 1)
+                        : null,
+                    child: const Icon(Icons.chevron_right),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
   }
 
   /// [v2.4.0] 底部弹出文本面板: 可点击句子 → 朗读, 点击翻译折叠展开译文

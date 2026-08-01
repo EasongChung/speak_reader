@@ -27,6 +27,23 @@ dependencies:
   # PDF 文本层提取(Android 基于 PDFBox)
   flutter_pdf_text: 0.9.0
 
+  # [v2.5.0] PDF 原文真实渲染(翻页/缩放/页码, Android 基于 AndroidPdfViewer)
+  flutter_pdfview: 1.4.4
+
+  # [v2.5.0] 端侧 GGUF 推理引擎(llama.cpp Dart FFI 绑定)
+  # 选型: llama_cpp_dart 0.2.2 —— 兼容 Flutter 3.22.3/Dart 3.4.4,
+  # 支持多模态视觉(mtmd/mmproj, Sprint 8 离线 OCR 硬需求),
+  # 原生库走 GitHub release 预编译 jni(免 CI 编译 C++, 见 scripts/download_llama_libs.sh)
+  llama_cpp_dart: 0.2.2
+
+  # [v2.5.0] 扫描版 PDF 逐页渲染为图片(离线 OCR 用, Sprint 8)
+  # 选型: pdf_render 1.4.12 —— 兼容 Dart >=2.17/Flutter >=1.20(与锁定环境兼容),
+  # Android 基于自研渲染器, 无第三方 so, 不拖累 APK 体积
+  pdf_render: 1.4.12
+
+  # [v2.5.0] RGBA → PNG 编码(与 llama_cpp_dart 传递依赖 image 4.5.4 一致)
+  image: 4.5.4
+
   # 运行时权限
   permission_handler: ^11.3.1
 
@@ -51,6 +68,10 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+
+  # [v2.5.0] 测试: 替换 path_provider 平台实现(固定文档目录)
+  # ^2.1.2 兼容锁定 Dart 3.4.4/Flutter 3.22.3(2.1.3 起要求 Dart ^3.10)
+  path_provider_platform_interface: ^2.1.2
 
 flutter:
   uses-material-design: true

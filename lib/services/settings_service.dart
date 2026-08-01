@@ -14,6 +14,19 @@ enum AudioFormat {
       .firstWhere((e) => e.name == n, orElse: () => AudioFormat.wav);
 }
 
+/// [v2.5.0] 翻译通道策略(在线 / 离线 GGUF 模型)。
+enum TranslationStrategy {
+  auto('自动(在线优先,离线兜底)'),
+  onlineOnly('仅在线'),
+  offlineOnly('仅离线');
+
+  const TranslationStrategy(this.label);
+  final String label;
+
+  static TranslationStrategy fromName(String? n) => TranslationStrategy.values
+      .firstWhere((e) => e.name == n, orElse: () => TranslationStrategy.auto);
+}
+
 /// 应用设置持久化:翻译 API 配置 + 朗读参数默认值。
 class AppSettings {
   // 翻译 API(OpenAI 兼容)
@@ -22,6 +35,8 @@ class AppSettings {
   String model;
 
   // [v2.4.0] 移除: preferOfflineTranslation(ML Kit 已删除,纯在线翻译)
+  // [v2.5.0] 翻译通道策略(在线 / 离线 GGUF)
+  TranslationStrategy translationStrategy;
 
   // 朗读参数
   int repeatCount; // 听写:每词重复遍数(1~10)
@@ -41,6 +56,7 @@ class AppSettings {
     this.apiKey = '',
     this.model = 'gpt-4o-mini',
     // [v2.4.0] 移除 preferOfflineTranslation
+    this.translationStrategy = TranslationStrategy.auto,
     this.repeatCount = 2,
     this.dictationGapSeconds = 2.0,
     this.repeatGapSeconds = 0.6,
@@ -61,6 +77,7 @@ class AppSettings {
     String? baseUrl,
     String? apiKey,
     String? model,
+    TranslationStrategy? translationStrategy,
     int? repeatCount,
     double? dictationGapSeconds,
     double? repeatGapSeconds,
@@ -76,6 +93,7 @@ class AppSettings {
         baseUrl: baseUrl ?? this.baseUrl,
         apiKey: apiKey ?? this.apiKey,
         model: model ?? this.model,
+        translationStrategy: translationStrategy ?? this.translationStrategy,
         repeatCount: repeatCount ?? this.repeatCount,
         dictationGapSeconds: dictationGapSeconds ?? this.dictationGapSeconds,
         repeatGapSeconds: repeatGapSeconds ?? this.repeatGapSeconds,
@@ -96,6 +114,8 @@ class SettingsService {
   static const _kApiKey = 'cfg_api_key';
   static const _kModel = 'cfg_model';
   // [v2.4.0] 移除: _kPreferOfflineTr
+  // [v2.5.0] 翻译通道策略
+  static const _kStrategy = 'cfg_translate_strategy';
   static const _kRepeat = 'cfg_repeat';
   static const _kDictGap = 'cfg_dict_gap';
   static const _kRepeatGap = 'cfg_repeat_gap';
@@ -114,6 +134,8 @@ class SettingsService {
       apiKey: p.getString(_kApiKey) ?? def.apiKey,
       model: p.getString(_kModel) ?? def.model,
       // [v2.4.0] 移除: preferOfflineTranslation
+      translationStrategy:
+          TranslationStrategy.fromName(p.getString(_kStrategy)),
       repeatCount: p.getInt(_kRepeat) ?? def.repeatCount,
       dictationGapSeconds: p.getDouble(_kDictGap) ?? def.dictationGapSeconds,
       repeatGapSeconds: p.getDouble(_kRepeatGap) ?? def.repeatGapSeconds,
@@ -149,6 +171,7 @@ class SettingsService {
     await require(p.setString(_kBaseUrl, s.baseUrl.trim()));
     await require(p.setString(_kApiKey, s.apiKey.trim()));
     await require(p.setString(_kModel, s.model.trim()));
+    await require(p.setString(_kStrategy, s.translationStrategy.name));
     await require(p.setInt(_kRepeat, s.repeatCount));
     await require(p.setDouble(_kDictGap, s.dictationGapSeconds));
     await require(p.setDouble(_kRepeatGap, s.repeatGapSeconds));

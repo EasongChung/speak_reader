@@ -272,9 +272,19 @@ class AudioExportService {
           .where((f) => f.path.toLowerCase().endsWith('.wav'))
           .where((f) => !p.basename(f.path).startsWith('.'))
           .toList();
-      files.sort(
-          (a, b) => b.statSync().modified.compareTo(a.statSync().modified));
-      return files;
+
+      // [v2.5.0] statSync → await stat: 大量文件时避免同步 IO 阻塞 UI 线程
+      final withTime = <(File, DateTime)>[];
+      for (final f in files) {
+        try {
+          final st = await f.stat();
+          withTime.add((f, st.modified));
+        } catch (_) {
+          // 单文件 stat 失败则跳过, 不因个别文件拖垮整个列表
+        }
+      }
+      withTime.sort((a, b) => b.$2.compareTo(a.$2));
+      return [for (final e in withTime) e.$1];
     } catch (_) {
       return [];
     }

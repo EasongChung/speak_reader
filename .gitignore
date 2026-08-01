@@ -12,6 +12,10 @@ android/app/debug/
 android/app/profile/
 android/app/release/
 *.apk
+# [v2.5.0] llama_cpp_dart 预编译原生库(由 scripts/download_llama_libs.sh 下载,不入库)
+android/app/src/main/jniLibs/
+# [v2.5.0] 锁文件不入库(CI 每次 flutter pub get 重新解析, 依赖浮动由 pubspec.yaml 精确版本控制)
+pubspec.lock
 
 # IDE
 .idea/

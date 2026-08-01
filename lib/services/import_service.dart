@@ -14,6 +14,16 @@ class ImportResult {
   ImportResult(this.content, this.source, this.title);
 }
 
+/// [v2.5.0] PDF 无文本层(扫描件/纯图片版),需走逐页渲染 + 离线 OCR(Sprint 8)。
+/// 单独类型便于上层捕获后触发扫描件 OCR 流程,而不是仅提示用户。
+class PdfHasNoTextLayerException implements Exception {
+  const PdfHasNoTextLayerException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// 文档导入服务:解析 .docx / .pdf / .txt 为纯文本。
 class ImportService {
   /// 根据文件扩展名解析文本内容
@@ -56,13 +66,15 @@ class ImportService {
 
       final text = (await document.text).trim();
       if (text.isEmpty) {
-        throw const FormatException(
-          '该 PDF 可能是扫描件(图片版),没有可提取的文字层。\n'
-          '建议:把 PDF 页面截图后用「拍照/相册」导入做文字识别。',
+        // [v2.5.0] 扫描件: 改为抛专用异常, 由上层决定走离线 OCR 还是提示
+        throw const PdfHasNoTextLayerException(
+          '该 PDF 是扫描件(图片版),没有可提取的文字层。',
         );
       }
       return text;
     } on FormatException {
+      rethrow;
+    } on PdfHasNoTextLayerException {
       rethrow;
     } catch (e) {
       throw Exception('无法打开该 PDF:$e');

@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 
+import '../models/local_model.dart';
 import '../services/audio_export_service.dart';
+import '../services/llama_cpp_engine.dart';
+import '../services/local_model_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_service.dart';
 
@@ -16,6 +19,9 @@ class _SettingsPageState extends State<SettingsPage> {
   final _service = SettingsService();
   final _translation = TranslationService();
   final _audioExport = AudioExportService();
+  // [v2.5.0] 本地模型(离线推理)
+  final _localModels = LocalModelService();
+  final _engine = LlamaCppEngine.instance;
 
   AppSettings _s = AppSettings();
   bool _loaded = false;
@@ -25,6 +31,12 @@ class _SettingsPageState extends State<SettingsPage> {
   int _loadRequest = 0;
   int _directoryRequest = 0;
   int _testRequest = 0;
+  // [v2.5.0] 本地模型状态
+  List<LocalModelInfo> _models = const [];
+  String _modelsDir = '';
+  int _modelsTotalSize = 0;
+  bool _modelsLoading = false;
+  int _modelRequest = 0;
 
   late TextEditingController _baseCtrl;
   late TextEditingController _keyCtrl;
@@ -37,6 +49,8 @@ class _SettingsPageState extends State<SettingsPage> {
     _keyCtrl = TextEditingController();
     _modelCtrl = TextEditingController();
     _load();
+    // [v2.5.0] 首次进入设置页即扫描本地模型
+    _refreshModels();
   }
 
   Future<void> _load() async {
@@ -190,6 +204,161 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // ================= [v2.5.0] 本地模型(离线推理) =================
+
+  /// 刷新模型清单与存储占用。
+  Future<void> _refreshModels() async {
+    final request = ++_modelRequest;
+    setState(() => _modelsLoading = true);
+    try {
+      final models = await _localModels.listModels();
+      final total = await _localModels.getTotalSize();
+      final dir = await _localModels.getModelsDir();
+      if (!mounted || request != _modelRequest) return;
+      setState(() {
+        _models = models;
+        _modelsTotalSize = total;
+        _modelsDir = dir.path;
+      });
+    } catch (e) {
+      if (mounted && request == _modelRequest) _toast('扫描模型失败:$e');
+    } finally {
+      if (mounted && request == _modelRequest) {
+        setState(() => _modelsLoading = false);
+      }
+    }
+  }
+
+  /// 加载模型到推理引擎(>3GB 先二次确认, 失败提示回退在线)。
+  Future<void> _loadModel(LocalModelInfo model) async {
+    if (_engine.isLoaded && _engine.loadedModelName == model.fileName) {
+      _toast('该模型已加载:${model.fileName}');
+      return;
+    }
+    // Sprint 6.5 内存保护: 大模型加载前二次确认
+    if (model.isLarge) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('大模型提醒'),
+          content: Text(
+            '${model.fileName} 体积约 ${model.sizeLabel}，'
+            '加载后可能占用大量内存(建议 ≥8GB 内存设备)。\n\n继续加载吗?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('继续加载'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+    }
+
+    _toast('正在加载模型,请稍候…(首次加载可能较慢)');
+    try {
+      await _engine.load(model);
+      if (!mounted) return;
+      setState(() {});
+      _toast('模型已加载:${model.fileName}');
+    } catch (e) {
+      if (mounted) _toast('$e');
+    }
+  }
+
+  /// 卸载当前模型。
+  Future<void> _unloadModel() async {
+    try {
+      await _engine.dispose();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {});
+    _toast('已卸载模型');
+  }
+
+  /// 删除模型文件(及配套 .mmproj), 若正被加载先卸载。
+  Future<void> _deleteModel(LocalModelInfo model) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除模型'),
+        content: Text('确定删除 ${model.fileName} 吗?\n'
+            '${model.mmprojPath != null ? "将同时删除配套的 .mmproj 文件。" : ""}'
+            '此操作不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    if (_engine.loadedModelName == model.fileName) {
+      await _engine.dispose();
+    }
+    try {
+      await _localModels.deleteModel(model);
+      await _refreshModels();
+      if (mounted) _toast('已删除:${model.fileName}');
+    } catch (e) {
+      if (mounted) _toast('删除失败:$e');
+    }
+  }
+
+  /// 单条模型展示卡片。
+  Widget _buildModelTile(LocalModelInfo m) {
+    final loaded = _engine.isLoaded && _engine.loadedModelName == m.fileName;
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: ListTile(
+        leading: Icon(
+          m.canOcr ? Icons.auto_awesome : Icons.memory,
+          color: m.canOcr ? Colors.deepPurple : Colors.blueGrey,
+        ),
+        title: Text(m.fileName, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text(
+          '${m.sizeLabel} · ${m.canOcr ? "多模态(可离线翻译+OCR)" : "文本(可离线翻译)"}',
+          style: const TextStyle(fontSize: 12),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (loaded)
+              const Padding(
+                padding: EdgeInsets.only(right: 8),
+                child: Text('已加载',
+                    style: TextStyle(color: Colors.green, fontSize: 12)),
+              ),
+            IconButton(
+              icon: Icon(loaded ? Icons.refresh : Icons.play_arrow),
+              tooltip: loaded ? '重新加载' : '加载模型',
+              onPressed: () => _loadModel(m),
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '删除',
+              onPressed: () => _deleteModel(m),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_loaded) {
@@ -259,6 +428,93 @@ class _SettingsPageState extends State<SettingsPage> {
                     child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.wifi_tethering),
             label: Text(_testing ? '测试中…' : '测试连接'),
+          ),
+          // [v2.5.0] 翻译通道策略
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Text('翻译通道'),
+              const SizedBox(width: 12),
+              Expanded(
+                child: DropdownButtonFormField<TranslationStrategy>(
+                  value: _s.translationStrategy,
+                  decoration: const InputDecoration(
+                      isDense: true, border: OutlineInputBorder()),
+                  items: [
+                    for (final s in TranslationStrategy.values)
+                      DropdownMenuItem(value: s, child: Text(s.label)),
+                  ],
+                  onChanged: (v) async {
+                    if (v == null) return;
+                    setState(() => _s.translationStrategy = v);
+                    await _persist();
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '「自动」:有网优先在线,失败自动切离线 GGUF;'
+            '「仅离线」需先到下方本地模型分区加载模型。',
+            style: TextStyle(color: Colors.grey, fontSize: 13),
+          ),
+          const Divider(height: 40),
+
+          // ================= [v2.5.0] 本地模型(离线推理) =================
+          _sectionTitle('本地模型(离线翻译 / 离线 OCR)'),
+          const Text(
+            '在手机安装 GGUF 模型后,即使断网也能离线翻译与图片识别。\n'
+            '模型不内置 APK,需自行下载放入:\n'
+            '$_modelsDir\n'
+            '已安装: ${_models.length} 个, 占用 ${_formatBytes(_modelsTotalSize)}',
+            style: TextStyle(color: Colors.grey, fontSize: 13),
+          ),
+          const SizedBox(height: 8),
+          if (_modelsLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_models.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text('未安装本地模型。推荐:',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  SizedBox(height: 4),
+                  Text(
+                      '• 离线翻译: MiniCPM5-1B-Q4_K_M.gguf (约 0.8GB, 4GB 内存设备可用)\n'
+                      '• 离线翻译+OCR: MiniCPM-V 4.6 (gguf + mmproj)\n'
+                      '• 高端: gemma-4-E2B-it (gguf + mmproj, 建议 8GB+ 内存)\n'
+                      '下载后点右上角「刷新」重新扫描。',
+                      style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ],
+              ),
+            )
+          else
+            for (final m in _models) _buildModelTile(m),
+          Row(
+            children: [
+              TextButton.icon(
+                onPressed: _modelsLoading ? null : _refreshModels,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('刷新'),
+              ),
+              if (_engine.isLoaded)
+                TextButton.icon(
+                  onPressed: _unloadModel,
+                  icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                  label: Text('卸载:${_engine.loadedModelName}',
+                      style: const TextStyle(fontSize: 12)),
+                ),
+              const Spacer(),
+              if (_engine.isLoaded)
+                Text('已加载 ${_engine.loadedModelName}',
+                    style: const TextStyle(color: Colors.green, fontSize: 12)),
+            ],
           ),
           const Divider(height: 40),
 
@@ -414,6 +670,16 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ],
     );
+  }
+
+  /// [v2.5.0] 字节数格式化。
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
+    final mb = kb / 1024;
+    if (mb < 1024) return '${mb.toStringAsFixed(1)} MB';
+    return '${(mb / 1024).toStringAsFixed(2)} GB';
   }
 
   Widget _stepper(

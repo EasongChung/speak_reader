@@ -48,6 +48,10 @@ jobs:
       - name: 运行测试
         run: flutter test
 
+      # [v2.5.0] llama_cpp_dart 预编译原生库(arm64-v8a, CPU+OpenCL+mtmd) 由脚本从 GitHub release 下载
+      - name: 下载 llama.cpp 原生库
+        run: bash scripts/download_llama_libs.sh
+
       # ===== 签名配置（与 Hermes Studio Mobile 同款方案）=====
       # 如果 Secrets 已配置 KEYSTORE_BASE64，直接解码还原 keystore 复用签名；
       # 否则首次运行自动生成 keystore，并将 keystore+密码打包为 artifact 供下载，
