@@ -1,8 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:docx_to_text/docx_to_text.dart';
+import 'package:archive/archive.dart';
 import 'package:flutter_pdf_text/flutter_pdf_text.dart';
+import 'package:xml/xml.dart';
 
 import '../models/document.dart';
 
@@ -51,10 +52,41 @@ class ImportService {
     }
   }
 
+  /// [v2.5.0] 自研 docx 文本提取(docx = zip + WordprocessingML XML)。
+  ///
+  /// 取代 `docx_to_text`(该包锁 `archive ^3.x` 且已停更, 与 image 4.5.4 的
+  /// `archive ^4.x` 冲突)。提取 `word/document.xml` 的 `<w:t>` 文本,
+  /// 段落 `<w:p>` 之间换行; 缺失/空文档时抛带说明的异常。
   Future<String> _readDocx(File file) async {
     final bytes = await file.readAsBytes();
-    final text = docxToText(bytes);
-    return text.trim();
+    final archive = ZipDecoder().decodeBytes(bytes);
+
+    ArchiveFile? entry;
+    for (final f in archive.files) {
+      if (f.name == 'word/document.xml') {
+        entry = f;
+        break;
+      }
+    }
+    if (entry == null) {
+      throw Exception('docx 缺少 word/document.xml,文件可能已损坏');
+    }
+    // archive 4.x: content 恒非空(Uint8List)
+    final xmlText = utf8.decode(entry.content, allowMalformed: true);
+
+    const wNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    final doc = XmlDocument.parse(xmlText);
+    final buffer = StringBuffer();
+    for (final p in doc.findAllElements('p', namespace: wNs)) {
+      final text =
+          p.findAllElements('t', namespace: wNs).map((t) => t.innerText).join();
+      if (text.trim().isNotEmpty) buffer.writeln(text.trim());
+    }
+    final result = buffer.toString().trim();
+    if (result.isEmpty) {
+      throw Exception('docx 未提取到文本,请确认文件内容');
+    }
+    return result;
   }
 
   Future<String> _readPdf(File file) async {

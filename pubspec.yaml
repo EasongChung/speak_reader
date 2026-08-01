@@ -21,8 +21,11 @@ dependencies:
   # 选择文件(docx/pdf/txt)
   file_picker: ^8.1.2
 
-  # Word(.docx)转文本
-  docx_to_text: ^1.0.1
+  # [v2.5.0] docx 解压与 XML 解析(自研 docx 文本提取, 见 import_service._readDocx)
+  # 取代 docx_to_text: docx_to_text 锁 archive ^3.x 且已停更, 与 image 4.5.4 的
+  # archive ^4.x 冲突; 自研提取依赖与 image 4.5.4 完全一致(archive ^4 + xml ^6)
+  archive: ^4.0.2
+  xml: ^6.0.1
 
   # PDF 文本层提取(Android 基于 PDFBox)
   flutter_pdf_text: 0.9.0
@@ -42,9 +45,9 @@ dependencies:
   pdf_render: 1.4.12
 
   # [v2.5.0] RGBA → PNG 编码(扫描件 OCR 用)
-  # 固定 4.3.0: 4.4+ 依赖 archive ^4.x, 与 docx_to_text(archive ^3.3.6) 冲突;
-  # 4.3.0 用 archive ^3.6.1 + xml ^6.x, 与 docx_to_text 公共依赖完全兼容(CI 验证)
-  image: 4.3.0
+  # 固定 4.5.4: 跟随 llama_cpp_dart 0.2.2 传递依赖(其约束 image ^4.5.4);
+  # docx 文本提取已自研(archive ^4 + xml ^6), 无需再兼容 docx_to_text 的 archive ^3.x
+  image: 4.5.4
 
   # 运行时权限
   permission_handler: ^11.3.1
