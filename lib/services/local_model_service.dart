@@ -14,6 +14,8 @@ import '../models/local_model.dart';
 ///   无法写入; `Android/media/<pkg>/` 为应用专属 media 目录, 用户可访问写入
 /// - 每个 `.gguf` 文件视为一个可用模型
 /// - 同目录的 `.mmproj` 作为视觉投影文件, 使模型具备多模态(OCR)能力
+/// - [v2.5.2] mmproj 兼容两种命名: 扩展名 `.mmproj`, 或 `.gguf` 且文件名
+///   含 `mmproj`(如 docs/10 推荐的 `mmproj-<model>-f16.gguf`, 不会被当主模型)
 /// - 模型不内置 APK, 用户可自行下载放入该目录; 也可使用设置页
 ///   「扫描下载目录」直接记录外部路径加载(scan 来源, 不复制文件)
 class LocalModelService {
@@ -98,13 +100,13 @@ class LocalModelService {
       return const [];
     }
 
+    // [v2.5.2] 划分主模型与投影: mmproj 候选 = .mmproj 或文件名含 mmproj 的 .gguf
+    final mmprojs = files.where(_isMmproj).toList();
     final ggufs = files
-        .where((f) => p.extension(f.path).toLowerCase() == '.gguf')
+        .where((f) =>
+            p.extension(f.path).toLowerCase() == '.gguf' && !_isMmproj(f))
         .toList()
       ..sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
-    final mmprojs = files
-        .where((f) => p.extension(f.path).toLowerCase() == '.mmproj')
-        .toList();
 
     final models = <LocalModelInfo>[];
     for (final f in ggufs) {
@@ -194,13 +196,13 @@ class LocalModelService {
     await _collectModelFiles(dir, files, depth);
     if (files.isEmpty) return const [];
 
+    // [v2.5.2] 划分主模型与投影: mmproj 候选 = .mmproj 或文件名含 mmproj 的 .gguf
+    final mmprojs = files.where(_isMmproj).toList();
     final ggufs = files
-        .where((f) => p.extension(f.path).toLowerCase() == '.gguf')
+        .where((f) =>
+            p.extension(f.path).toLowerCase() == '.gguf' && !_isMmproj(f))
         .toList()
       ..sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
-    final mmprojs = files
-        .where((f) => p.extension(f.path).toLowerCase() == '.mmproj')
-        .toList();
 
     final models = <LocalModelInfo>[];
     for (final f in ggufs) {
@@ -226,8 +228,7 @@ class LocalModelService {
     try {
       await for (final entity in dir.list(followLinks: false)) {
         if (entity is File) {
-          final ext = p.extension(entity.path).toLowerCase();
-          if (ext == '.gguf' || ext == '.mmproj') out.add(entity);
+          if (_isModelFile(entity)) out.add(entity);
         } else if (entity is Directory && depth > 1) {
           await _collectModelFiles(entity, out, depth - 1);
         }
@@ -287,6 +288,27 @@ class LocalModelService {
     }
   }
 
+  /// [v2.5.2] 是否可扫描的模型文件(.gguf 或 .mmproj)。
+  bool _isModelFile(File f) {
+    final ext = p.extension(f.path).toLowerCase();
+    return ext == '.gguf' || ext == '.mmproj';
+  }
+
+  /// [v2.5.2] 是否 mmproj 视觉投影文件:
+  /// 扩展名 `.mmproj`, 或 `.gguf` 且文件名含 `mmproj`(兼容 docs/10 推荐的
+  /// `mmproj-<model>-f16.gguf` 命名, 此类文件不被当作独立主模型)。
+  bool _isMmproj(File f) {
+    final ext = p.extension(f.path).toLowerCase();
+    if (ext == '.mmproj') return true;
+    if (ext == '.gguf') {
+      return p
+          .basenameWithoutExtension(f.path)
+          .toLowerCase()
+          .contains('mmproj');
+    }
+    return false;
+  }
+
   /// 匹配 .gguf 的配套 .mmproj(优先家族名匹配, 其次唯一匹配)。
   String? _matchMmproj(File gguf, List<File> mmprojs, int ggufCount) {
     if (mmprojs.isEmpty) return null;
@@ -316,8 +338,11 @@ class LocalModelService {
   String _familyName(String base) {
     final parts = base.split('-');
     if (parts.length <= 1) return base;
-    // 去掉尾部常见的量化/精度段: q4, q8, f16, q4_k_m, iq4, 数字精度等
-    final known = RegExp(r'^(q[248]|q[248]_[km]|iq[1-4]|f16|f32|bf16|gguf)$');
+    // [v2.5.2] 去掉尾部常见的量化/精度段: q4, q8, f16, q4_k_m, q5_k_m, iq4_xs,
+    // 数字精度等。原正则 q[248]_[km] 不匹配双下划线 q4_k_m, 导致家族名剥离失败,
+    // 传统 .mmproj 命名被「唯一 gguf 兜底」掩盖; 兼容 mmproj-*.gguf 命名时暴露。
+    final known = RegExp(
+        r'^(q[0-9](?:_[a-z0-9]+)*|iq[0-9](?:_[a-z0-9]+)*|f16|f32|bf16|gguf)$');
     final fam = <String>[];
     for (final part in parts) {
       if (known.hasMatch(part) ||

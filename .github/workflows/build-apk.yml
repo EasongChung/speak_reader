@@ -1,10 +1,12 @@
 name: Build Android APK & Release
 
+# [v2.5.1] 每次 push 到 main 自动构建并发布：构建成功后自动创建
+# v<version>-<时间> 标签并发布 Release（附 APK）。不再用 tags: ['v*'] 触发器，
+# 否则「自动推 tag」会再次触发构建形成无限循环。
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    tags: ['v*']
 
 jobs:
   build:
@@ -144,26 +146,37 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: 读取标签信息
-        if: startsWith(github.ref, 'refs/tags/')
+      # [v2.5.1] 每次构建成功后自动创建 v<version>-<时间> 标签并推送,
+      # 时间戳(UTC, 秒级)保证每次 push 的 tag 唯一, 互不覆盖
+      - name: 创建并推送版本标签
         id: tag
         shell: bash
         run: |
-          echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          VERSION="$(grep '^version:' pubspec.yaml | head -1 | awk '{print $2}')"
+          test -n "$VERSION"
+          TS="$(date -u '+%Y%m%d-%H%M%S')"
+          TAG="v${VERSION}-${TS}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
           echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git tag -f "${TAG}"
+          git push origin "refs/tags/${TAG}" --force
 
+      # [v2.5.1] 无条件发布 Release(update: true 幂等, 同版本重复构建时更新已存在 Release)
       - name: 发布到 Releases
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: Speak Reader ${{ steps.tag.outputs.name }}
+          tag_name: ${{ env.TAG }}
+          name: Speak Reader ${{ env.TAG }}
           body: |
             Speak Reader Android APK
-            版本: ${{ steps.tag.outputs.name }}
+            版本: ${{ env.TAG }}
             架构: arm64-v8a
             构建日期: ${{ steps.tag.outputs.date }}
             工作流: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           files: build/app/outputs/flutter-apk/speak-reader-*-arm64-v8a.apk
           draft: false
           prerelease: false
+          update: true

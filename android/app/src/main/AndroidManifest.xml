@@ -11,6 +11,10 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"/>
 
+    <!-- [v2.5.2] 读取 Download/外部目录中的 .gguf 模型(非媒体文件, 分区存储下
+         直接路径 fopen 需要此权限; 个人 fork 不上 Play Store, 无政策风险) -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+
     <application
         android:label="语音朗读"
         android:name="${applicationName}"

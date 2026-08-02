@@ -78,6 +78,9 @@ class _ReaderPageState extends State<ReaderPage> {
     _tts.onTokenChanged = (i) {
       if (!mounted) return;
       setState(() => _currentToken = i);
+      // [v2.5.2] 「查看文本」弹窗内高亮跟随朗读(弹窗为 StatefulBuilder,
+      // 需单独触发 setSheet 才会重建)
+      _sheetRebuild?.call();
       _autoScrollTo(i);
     };
     _tts.onStateChanged = (s) {
@@ -89,7 +92,9 @@ class _ReaderPageState extends State<ReaderPage> {
 
     _init();
     // [v2.4.0] 有原始图片时默认进入原文模式
-    if (_doc.isImageOriginal) {
+    // [v2.5.2] 默认原文扩展到所有保留原文件的文档(图片/PDF/docx);
+    // 弱排版文本(TXT/MD)不保留原文件(hasOriginal=false), 自动走文本模式
+    if (_doc.hasOriginal) {
       _originalMode = true;
     }
   }
@@ -832,7 +837,8 @@ class _ReaderPageState extends State<ReaderPage> {
             },
             onPageChanged: (page, total) {
               if (!mounted) return;
-              setState(() => _pdfCurrentPage = page ?? _pdfCurrentPage);
+              // [v2.5.2] 原文翻页联动「查看文本」弹窗与文本阅读内容
+              _syncPage(page ?? _pdfCurrentPage);
             },
             onViewCreated: (vc) {
               _pdfController = vc;
@@ -841,8 +847,9 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         // 渲染中: 显示加载指示器
         if (!_pdfReady) const Center(child: CircularProgressIndicator()),
-        // 底部控制条: 上一页 + 页码(点击查看文本) + 下一页
-        if (_pdfReady)
+        // 底部控制条: 目录(仅多页) + 上一页 + 页码(点击查看文本) + 下一页
+        // [v2.5.2] 目录按钮回控制组最左侧(与翻页组同行对齐, 风格一致), 整体居中
+        if (_pdfReady) ...[
           Positioned(
             left: 0,
             right: 0,
@@ -851,7 +858,7 @@ class _ReaderPageState extends State<ReaderPage> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // [v2.5.1] 目录按钮(仅多页面文件显示)
+                  // 目录按钮(仅多页面文件显示, 位于控制组最左)
                   if (_pdfPageCount > 1) ...[
                     FloatingActionButton.small(
                       heroTag: 'pdf_toc',
@@ -886,6 +893,7 @@ class _ReaderPageState extends State<ReaderPage> {
               ),
             ),
           ),
+        ],
       ],
     );
   }
@@ -991,11 +999,12 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  /// [v2.5.1] 文本模式切换页面(多页文件): 重新切分当前页文本。
-  void _changePage(int delta) {
+  /// [v2.5.2] 统一翻页同步: 更新页码并重新切分当前页文本, 联动
+  /// 「查看文本」弹窗与文本阅读(原文翻页/目录跳页/文本翻页共用)。
+  void _syncPage(int page) {
     final total = _pageTexts?.length ?? 0;
     if (total <= 1) return;
-    final next = (_pdfCurrentPage + delta).clamp(0, total - 1);
+    final next = page.clamp(0, total - 1);
     if (next == _pdfCurrentPage) return;
     _tts.stop();
     if (!mounted) return;
@@ -1010,6 +1019,13 @@ class _ReaderPageState extends State<ReaderPage> {
       _tts.setText(_displayText);
     });
     _sheetRebuild?.call();
+  }
+
+  /// [v2.5.1] 文本模式切换页面(多页文件): 重新切分当前页文本。
+  void _changePage(int delta) {
+    final total = _pageTexts?.length ?? 0;
+    if (total <= 1) return;
+    _syncPage(_pdfCurrentPage + delta);
   }
 
   /// [v2.5.1] PDF 目录弹窗(仅多页): 列出页码 + 每页文本摘要, 点击跳页。
@@ -1063,7 +1079,9 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// [v2.4.0] 可交互 token 文本: 点击朗读, 点击翻译在本句下方折叠译文
-  Widget _buildTokenText([ScrollController? scrollController]) {
+  /// [v2.5.2] [bottomPadding]: 多页文本模式为底部悬浮页导航预留空间
+  Widget _buildTokenText(
+      [ScrollController? scrollController, double bottomPadding = 24]) {
     final tokens = _tts.tokens;
     if (tokens.isEmpty) {
       return const Center(child: Text('没有可朗读的内容'));
@@ -1075,7 +1093,7 @@ class _ReaderPageState extends State<ReaderPage> {
     );
     return SingleChildScrollView(
       controller: scrollController,
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      padding: EdgeInsets.fromLTRB(16, 16, 16, bottomPadding),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1142,41 +1160,63 @@ class _ReaderPageState extends State<ReaderPage> {
     if (_tts.tokens.isEmpty) {
       return const Center(child: Text('没有可朗读的内容'));
     }
-    // [v2.5.1] 多页文件: 顶部页导航 + 当前页文本
-    return Column(
+    // [v2.5.2] 多页文件: 底部悬浮页导航(复刻原文模式 FAB 设计, 定位一致),
+    // 文本区预留底部空间避免遮挡
+    return Stack(
       children: [
-        if (_isMultiPage) _buildPageNavBar(),
-        Expanded(child: _buildTokenText(_scrollController)),
+        Positioned.fill(
+          child: Column(
+            children: [
+              Expanded(
+                child: _buildTokenText(
+                  _scrollController,
+                  _isMultiPage ? 96 : 24,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_isMultiPage) _buildFloatingPageNav(),
       ],
     );
   }
 
-  /// [v2.5.1] 文本模式页导航(参照原文翻页按钮): [‹] 第N/总 [›]
-  Widget _buildPageNavBar() {
+  /// [v2.5.2] 文本模式悬浮页导航: 复刻原文模式悬浮 FAB(bottom:24 居中)。
+  Widget _buildFloatingPageNav() {
     final total = _pageTexts?.length ?? 0;
     if (total <= 1) return const SizedBox.shrink();
-    return SafeArea(
-      bottom: false,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    // [v2.5.2] 复刻原文模式控制组布局: [目录] [‹] [页码] [›], 定位/风格一致
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 24,
+      child: Center(
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              icon: const Icon(Icons.chevron_left),
-              tooltip: '上一页',
-              onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
-            ),
-            TextButton(
+            FloatingActionButton.small(
+              heroTag: 'text_toc',
               onPressed: _showPdfToc,
-              child: Text('第 ${_pdfCurrentPage + 1} / $total 页',
-                  style: const TextStyle(fontSize: 14)),
+              child: const Icon(Icons.menu),
             ),
-            IconButton(
-              icon: const Icon(Icons.chevron_right),
-              tooltip: '下一页',
+            const SizedBox(width: 12),
+            FloatingActionButton.small(
+              heroTag: 'text_prev',
+              onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+              child: const Icon(Icons.chevron_left),
+            ),
+            const SizedBox(width: 12),
+            FloatingActionButton.extended(
+              heroTag: 'text_page',
+              label: Text('${_pdfCurrentPage + 1} / $total'),
+              onPressed: _showPdfToc,
+            ),
+            const SizedBox(width: 12),
+            FloatingActionButton.small(
+              heroTag: 'text_next',
               onPressed:
                   _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+              child: const Icon(Icons.chevron_right),
             ),
           ],
         ),

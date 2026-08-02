@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../models/local_model.dart';
 import '../services/audio_export_service.dart';
@@ -40,6 +41,8 @@ class _SettingsPageState extends State<SettingsPage> {
   // [v2.5.1] 扫描下载目录状态
   bool _scanningModels = false;
   int _scanRequest = 0;
+  // [v2.5.2] 「所有文件访问」权限状态(读取 Download/外部目录 .gguf 必需)
+  bool _storageAccess = false;
 
   late TextEditingController _baseCtrl;
   late TextEditingController _keyCtrl;
@@ -217,11 +220,14 @@ class _SettingsPageState extends State<SettingsPage> {
       final models = await _localModels.listModels();
       final total = await _localModels.getTotalSize();
       final dir = await _localModels.getModelsDir();
+      // [v2.5.2] 同步检测「所有文件访问」权限(影响 Download/外部目录模型读取)
+      final storage = await _hasAllFilesAccess();
       if (!mounted || request != _modelRequest) return;
       setState(() {
         _models = models;
         _modelsTotalSize = total;
         _modelsDir = dir.path;
+        _storageAccess = storage;
       });
     } catch (e) {
       if (mounted && request == _modelRequest) _toast('扫描模型失败:$e');
@@ -229,6 +235,32 @@ class _SettingsPageState extends State<SettingsPage> {
       if (mounted && request == _modelRequest) {
         setState(() => _modelsLoading = false);
       }
+    }
+  }
+
+  /// [v2.5.2] 是否已授予「所有文件访问」(Android 11+ 读取 Download/外部 .gguf 必需)。
+  Future<bool> _hasAllFilesAccess() async {
+    try {
+      return await Permission.manageExternalStorage.isGranted;
+    } catch (_) {
+      return false; // 旧版 Android/不支持的设备视为未授权, 不影响主流程
+    }
+  }
+
+  /// [v2.5.2] 请求「所有文件访问」权限, 授权成功后刷新模型清单。
+  Future<void> _requestStorageAccess() async {
+    final status = await Permission.manageExternalStorage.request();
+    final granted = status.isGranted;
+    if (!mounted) return;
+    setState(() => _storageAccess = granted);
+    if (granted) {
+      _toast('已获得「所有文件访问」权限');
+      await _refreshModels();
+    } else if (status.isPermanentlyDenied) {
+      _toast('权限被永久拒绝,请在系统设置中手动开启「所有文件访问」');
+      await openAppSettings();
+    } else {
+      _toast('未授权「所有文件访问」, Download 目录中的模型仍无法读取');
     }
   }
 
@@ -535,11 +567,42 @@ class _SettingsPageState extends State<SettingsPage> {
             '模型不内置 APK,可自行下载放入:\n'
             '$_modelsDir\n'
             '(该目录为应用专属 media 目录,文件管理器可直接访问写入;'
-            '也可点下方「扫描下载目录」直接加载 Download 中的模型,免去手动放置)\n'
+            '也可点下方「扫描下载目录」直接加载 Download 中的模型,免去手动放置;\n'
+            '读取 Download/外部目录中的 .gguf 需开启「所有文件访问」权限)\n'
             '已安装: ${_models.length} 个, 占用 ${_formatBytes(_modelsTotalSize)}',
             style: TextStyle(color: Colors.grey, fontSize: 13),
           ),
           const SizedBox(height: 8),
+          // [v2.5.2] 未授予「所有文件访问」时的提示横幅
+          if (!_storageAccess) ...[
+            Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              color: Theme.of(context)
+                  .colorScheme
+                  .errorContainer
+                  .withValues(alpha: 0.35),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, size: 20),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        '读取 Download/扫描目录中的 .gguf 模型需授权'
+                        '「所有文件访问」,请先授权后重试。',
+                        style: TextStyle(fontSize: 13),
+                      ),
+                    ),
+                    FilledButton(
+                      onPressed: _requestStorageAccess,
+                      child: const Text('立即授权'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           if (_modelsLoading)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 16),

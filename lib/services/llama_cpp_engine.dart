@@ -34,6 +34,18 @@ class LlamaCppEngine implements InferenceEngine {
     if (isLoaded && _model?.path == model.path) return;
     await dispose();
 
+    // [v2.5.2] 加载前验证文件可读, 精确区分「权限不足」与「文件损坏/引擎不支持」。
+    // Dart File.open 与 llama native fopen 同为 open(2), 若此处失败则 fopen 必失败,
+    // 提示用户授权「所有文件访问」; 若此处通过而加载仍失败, 则是模型文件本身问题。
+    final file = File(model.path);
+    try {
+      final raf = file.openSync(mode: FileMode.read);
+      raf.closeSync();
+    } catch (_) {
+      throw Exception('模型文件无法读取(${model.fileName})\n'
+          '请先在「设置 → 本地模型」授权「所有文件访问」后重试');
+    }
+
     final contextParams = ContextParams()
       ..nCtx = 4096
       ..nPredict = 512

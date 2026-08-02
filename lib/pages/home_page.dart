@@ -203,6 +203,12 @@ class _HomePageState extends State<HomePage> {
         if (path.toLowerCase().endsWith('.pdf')) {
           originalPath = await _storage.copyOriginal(path, 'pdf');
           originalMime = 'application/pdf';
+        } else if (path.toLowerCase().endsWith('.docx')) {
+          // [v2.5.2] docx 也保留原文件: 富排版文档默认进原文模式
+          // (原文视图暂不提供原样排版渲染, 显示提取文本, 顶栏保留「原文」开关)
+          originalPath = await _storage.copyOriginal(path, 'docx');
+          originalMime =
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         }
         final doc = _newDoc(
           title: imported.title,
