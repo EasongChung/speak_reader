@@ -26,6 +26,7 @@ class PdfOcrResult {
     required this.recognizedPages,
     required this.failedPages,
     required this.cancelled,
+    this.pages, // [v2.5.1]
   });
 
   /// 合并后的全文(按页面顺序拼接)。
@@ -41,6 +42,9 @@ class PdfOcrResult {
 
   /// 用户取消(中断)时为 true, 已识别结果已落盘, 可再次导入续批。
   final bool cancelled;
+
+  /// [v2.5.1] 按页文本(索引=页码-1, 识别失败/空的页为空字符串), 供阅读页按页显示。
+  final List<String>? pages;
 }
 
 /// [v2.5.0] 扫描版 PDF(无文本层)逐页渲染 + OCR 批处理。
@@ -170,6 +174,8 @@ class PdfOcrService {
         recognizedPages: results.length,
         failedPages: failed,
         cancelled: cancelled,
+        // [v2.5.1] 按页序输出(未识别页为空串), 供阅读页按页显示
+        pages: List<String>.generate(total, (i) => results[i]?.trim() ?? ''),
       );
     } finally {
       // 全部页处理完成 → 清理 checkpoint; 否则(中断/失败)保留供续批

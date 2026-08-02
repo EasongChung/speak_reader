@@ -210,6 +210,7 @@ class _HomePageState extends State<HomePage> {
           source: imported.source,
           originalFilePath: originalPath,
           originalFileMime: originalMime,
+          pageTexts: imported.pageTexts, // [v2.5.1] 多页 PDF 分页文本
         );
         await _commitAndOpen(doc, rollbackOriginalPath: originalPath);
       } on PdfHasNoTextLayerException catch (e) {
@@ -337,6 +338,7 @@ class _HomePageState extends State<HomePage> {
       source: DocSource.pdf,
       originalFilePath: originalPath,
       originalFileMime: 'application/pdf',
+      pageTexts: result.pages, // [v2.5.1] 扫描件按页识别结果
     );
   }
 
@@ -347,6 +349,8 @@ class _HomePageState extends State<HomePage> {
     // [v2.4.0] 原文文件信息（可选参数）
     String? originalFilePath,
     String? originalFileMime,
+    // [v2.5.1] 多页面文件分页文本（可选参数）
+    List<String>? pageTexts,
   }) {
     final now = DateTime.now();
     return Document(
@@ -357,6 +361,7 @@ class _HomePageState extends State<HomePage> {
       createdAt: now.millisecondsSinceEpoch,
       originalFilePath: originalFilePath,
       originalFileMime: originalFileMime,
+      pageTexts: pageTexts,
     );
   }
 

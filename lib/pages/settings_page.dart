@@ -37,6 +37,9 @@ class _SettingsPageState extends State<SettingsPage> {
   int _modelsTotalSize = 0;
   bool _modelsLoading = false;
   int _modelRequest = 0;
+  // [v2.5.1] 扫描下载目录状态
+  bool _scanningModels = false;
+  int _scanRequest = 0;
 
   late TextEditingController _baseCtrl;
   late TextEditingController _keyCtrl;
@@ -229,6 +232,44 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  /// [v2.5.1] 清除扫描目录记录并刷新模型清单。
+  Future<void> _clearScanDir() async {
+    await _localModels.setScanDir(null);
+    await _refreshModels();
+    if (mounted) _toast('已清除扫描目录记录');
+  }
+
+  /// [v2.5.1] 扫描「下载目录」模型并记录路径直接加载。
+  ///
+  /// 优先直扫系统 Download 目录(权限允许时); 未发现任何模型时,
+  /// 弹系统目录选择器让用户授权一次下载目录, 记录路径后每次进设置页自动重扫。
+  Future<void> _scanDownloadModels() async {
+    if (_scanningModels) return;
+    final request = ++_scanRequest;
+    setState(() => _scanningModels = true);
+    try {
+      final found = await _localModels.scanDownloadDir();
+      if (found.isEmpty && mounted && request == _scanRequest) {
+        // 直扫无果 → 目录选择器授权(兼容 Android 11+ 分区存储)
+        final dir = await FilePicker.platform.getDirectoryPath();
+        if (dir == null || !mounted || request != _scanRequest) return;
+        await _localModels.setScanDir(dir);
+      }
+      await _refreshModels();
+      if (mounted && request == _scanRequest) {
+        _toast(found.isEmpty
+            ? '未在所选目录发现模型文件'
+            : '发现 ${found.length} 个模型(来自下载目录, 已记录路径)');
+      }
+    } catch (e) {
+      if (mounted && request == _scanRequest) _toast('扫描失败:$e');
+    } finally {
+      if (mounted && request == _scanRequest) {
+        setState(() => _scanningModels = false);
+      }
+    }
+  }
+
   /// 加载模型到推理引擎(>3GB 先二次确认, 失败提示回退在线)。
   Future<void> _loadModel(LocalModelInfo model) async {
     if (_engine.isLoaded && _engine.loadedModelName == model.fileName) {
@@ -322,6 +363,8 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 单条模型展示卡片。
   Widget _buildModelTile(LocalModelInfo m) {
     final loaded = _engine.isLoaded && _engine.loadedModelName == m.fileName;
+    // [v2.5.1] 扫描来源模型带标签
+    final fromScan = m.source == LocalModelSource.scan;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
@@ -329,9 +372,29 @@ class _SettingsPageState extends State<SettingsPage> {
           m.canOcr ? Icons.auto_awesome : Icons.memory,
           color: m.canOcr ? Colors.deepPurple : Colors.blueGrey,
         ),
-        title: Text(m.fileName, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: Row(
+          children: [
+            Flexible(
+              child: Text(m.fileName,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            if (fromScan) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: const Text('下载目录',
+                    style: TextStyle(fontSize: 10, color: Colors.orange)),
+              ),
+            ],
+          ],
+        ),
         subtitle: Text(
-          '${m.sizeLabel} · ${m.canOcr ? "多模态(可离线翻译+OCR)" : "文本(可离线翻译)"}',
+          '${m.sizeLabel} · ${m.canOcr ? "多模态(可离线翻译+OCR)" : "文本(可离线翻译)"}'
+          '${fromScan ? "\n来自下载目录, 记录路径直接加载(未复制文件)" : ""}',
           style: const TextStyle(fontSize: 12),
         ),
         trailing: Row(
@@ -348,11 +411,13 @@ class _SettingsPageState extends State<SettingsPage> {
               tooltip: loaded ? '重新加载' : '加载模型',
               onPressed: () => _loadModel(m),
             ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline),
-              tooltip: '删除',
-              onPressed: () => _deleteModel(m),
-            ),
+            // [v2.5.1] 扫描来源模型不提供应用内删除
+            if (m.canDelete)
+              IconButton(
+                icon: const Icon(Icons.delete_outline),
+                tooltip: '删除',
+                onPressed: () => _deleteModel(m),
+              ),
           ],
         ),
       ),
@@ -467,8 +532,10 @@ class _SettingsPageState extends State<SettingsPage> {
           _sectionTitle('本地模型(离线翻译 / 离线 OCR)'),
           Text(
             '在手机安装 GGUF 模型后,即使断网也能离线翻译与图片识别。\n'
-            '模型不内置 APK,需自行下载放入:\n'
+            '模型不内置 APK,可自行下载放入:\n'
             '$_modelsDir\n'
+            '(该目录为应用专属 media 目录,文件管理器可直接访问写入;'
+            '也可点下方「扫描下载目录」直接加载 Download 中的模型,免去手动放置)\n'
             '已安装: ${_models.length} 个, 占用 ${_formatBytes(_modelsTotalSize)}',
             style: TextStyle(color: Colors.grey, fontSize: 13),
           ),
@@ -491,7 +558,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       '• 离线翻译: MiniCPM5-1B-Q4_K_M.gguf (约 0.8GB, 4GB 内存设备可用)\n'
                       '• 离线翻译+OCR: MiniCPM-V 4.6 (gguf + mmproj)\n'
                       '• 高端: gemma-4-E2B-it (gguf + mmproj, 建议 8GB+ 内存)\n'
-                      '下载后点右上角「刷新」重新扫描。',
+                      '下载后放入上述目录点「刷新」,或点下方「扫描下载目录」直接加载 Download 中的模型。',
                       style: TextStyle(color: Colors.grey, fontSize: 13)),
                 ],
               ),
@@ -517,6 +584,31 @@ class _SettingsPageState extends State<SettingsPage> {
                 Text('已加载 ${_engine.loadedModelName}',
                     style: const TextStyle(color: Colors.green, fontSize: 12)),
             ],
+          ),
+          // [v2.5.1] 扫描下载目录: 记录路径直接加载, 免去手动放置
+          Row(
+            children: [
+              TextButton.icon(
+                onPressed: _scanningModels ? null : _scanDownloadModels,
+                icon: _scanningModels
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.folder_open, size: 18),
+                label: Text(_scanningModels ? '扫描中…' : '扫描下载目录'),
+              ),
+              TextButton.icon(
+                onPressed: _scanningModels ? null : _clearScanDir,
+                icon: const Icon(Icons.link_off, size: 18),
+                label: const Text('清除扫描记录'),
+              ),
+            ],
+          ),
+          const Text(
+            '「扫描下载目录」优先查找系统 Download 中的 .gguf 模型;'
+            '若权限不足会提示选择一次目录,路径会被记住并在每次进入本页自动重扫。',
+            style: TextStyle(color: Colors.grey, fontSize: 12),
           ),
           const Divider(height: 40),
 

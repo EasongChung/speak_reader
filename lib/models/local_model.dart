@@ -7,6 +7,15 @@ enum LocalModelKind {
   multimodal,
 }
 
+/// [v2.5.1] 模型来源。
+enum LocalModelSource {
+  /// 位于应用模型目录(可删除)
+  managed,
+
+  /// 用户扫描的下载/自定义目录(仅记录路径直接加载, 不提供应用内删除)
+  scan,
+}
+
 /// [v2.5.0] 本地模型信息(由 LocalModelService 扫描应用 models 目录得到)。
 class LocalModelInfo {
   /// .gguf 模型的绝对路径
@@ -24,12 +33,16 @@ class LocalModelInfo {
   /// 配套的视觉投影文件(.mmproj)绝对路径, 多模态模型非空
   final String? mmprojPath;
 
+  /// [v2.5.1] 模型来源(默认: 应用模型目录)
+  final LocalModelSource source;
+
   const LocalModelInfo({
     required this.path,
     required this.fileName,
     required this.sizeBytes,
     required this.kind,
     this.mmprojPath,
+    this.source = LocalModelSource.managed, // [v2.5.1] 默认模型目录, 向后兼容
   });
 
   /// 人类可读的体积
@@ -44,6 +57,9 @@ class LocalModelInfo {
 
   /// 大模型(>3GB)加载需二次确认(内存保护, Sprint 6.5)
   bool get isLarge => sizeBytes > 3 * 1024 * 1024 * 1024;
+
+  /// [v2.5.1] 是否允许应用内删除(仅模型目录来源)。
+  bool get canDelete => source == LocalModelSource.managed;
 
   /// 该模型能否用于离线翻译
   bool get canTranslate => true;

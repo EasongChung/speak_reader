@@ -55,6 +55,18 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _pdfReady = false;
   String? _pdfError;
 
+  // [v2.5.1] 多页面文件按页显示
+  List<String>? get _pageTexts => _doc.pageTexts;
+  bool get _isMultiPage => _doc.isMultiPage;
+
+  /// [v2.5.1] 当前应显示的文本: 多页文件取当前 PDF 页, 否则全文。
+  String get _displayText {
+    final pages = _pageTexts;
+    if (pages == null || pages.isEmpty) return _doc.content;
+    final i = _pdfCurrentPage.clamp(0, pages.length - 1);
+    return pages[i];
+  }
+
   final _tokenKeys = <int, GlobalKey>{};
 
   @override
@@ -98,7 +110,7 @@ class _ReaderPageState extends State<ReaderPage> {
     await _tts.init();
     if (!mounted) return;
 
-    _tts.setText(_doc.content); // 默认常规模式切句
+    _tts.setText(_displayText); // [v2.5.1] 多页文件按当前页切句
     setState(() {});
     // 开启了"自动生成音频"时,后台静默导出一份(不阻断朗读)
     if (settings.autoExportAudio) {
@@ -161,7 +173,7 @@ class _ReaderPageState extends State<ReaderPage> {
     if (!mounted) return;
     setState(() {
       // 切换模式需按新模式重新切分文本
-      _tts.setModeAndText(v, _doc.content);
+      _tts.setModeAndText(v, _displayText); // [v2.5.1] 多页按当前页
       _contentRevision++;
       _translationRequest++;
       _translating = false;
@@ -209,7 +221,7 @@ class _ReaderPageState extends State<ReaderPage> {
       final dictation = _tts.dictationMode;
       final path = await _audioExport.exportDocument(
         _tts,
-        _doc.content,
+        _displayText, // [v2.5.1] 多页文件导出当前页
         dictation: dictation,
         rate: dictation ? _tts.dictationRate : _tts.speechRate,
         repeatCount: _tts.repeatCount,
@@ -447,7 +459,15 @@ class _ReaderPageState extends State<ReaderPage> {
       await _tts.stop();
       if (!mounted) return;
       setState(() {
-        _doc.content = _editController.text;
+        // [v2.5.1] 多页文件: 仅更新当前页文本并重建全文
+        final pages = _doc.pageTexts;
+        if (pages != null && pages.isNotEmpty) {
+          final i = _pdfCurrentPage.clamp(0, pages.length - 1);
+          pages[i] = _editController.text;
+          _doc.content = pages.join('\n\n').trim();
+        } else {
+          _doc.content = _editController.text;
+        }
         _editing = false;
         _contentRevision++;
         _translationRequest++;
@@ -455,7 +475,7 @@ class _ReaderPageState extends State<ReaderPage> {
         _translations.clear();
         _tokenKeys.clear();
       });
-      _tts.setText(_doc.content);
+      _tts.setText(_displayText); // [v2.5.1] 保存后按当前页重新切句
       _sheetRebuild?.call();
       await _storage.upsert(_doc);
       if (!mounted) return;
@@ -465,7 +485,7 @@ class _ReaderPageState extends State<ReaderPage> {
     } else {
       await _tts.stop();
       if (!mounted) return;
-      _editController.text = _doc.content;
+      _editController.text = _displayText; // [v2.5.1] 多页编辑当前页
       setState(() => _editing = true);
     }
   }
@@ -513,6 +533,8 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         actions: _buildAppBarActions(),
       ),
+      // [v2.5.1] 文本模式顶部操作收纳抽屉(需求: 顶部仅保留切换原文 + 更多)
+      endDrawer: _buildReaderDrawer(),
       body: _originalMode
           ? _buildOriginalReader()
           : (_editing ? _buildEditor() : _buildReader()),
@@ -521,6 +543,7 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// [v2.4.0] 根据模式构建 AppBar 按钮
+  /// [v2.5.1] 文本模式顶部仅保留「原文」切换 + 「更多(抽屉)」, 其余操作收纳抽屉
   List<Widget> _buildAppBarActions() {
     if (_originalMode) {
       // [v2.4.0] 原文模式: 仅「文本模式」切换
@@ -532,56 +555,127 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
       ];
     }
-    // 文本模式
-    final actions = <Widget>[
+    // [v2.5.1] 文本模式: 顶部仅「原文」切换(有原文时) + 「更多」按钮
+    return [
       if (_doc.hasOriginal && !_editing) // [v2.4.0] 有原文时显示切换按钮
         IconButton(
           icon: const Icon(Icons.image),
           tooltip: '原文',
           onPressed: () => setState(() {
             _originalMode = true;
-            // [v2.5.0] 重新进入原文模式时重置 PDF 渲染状态(避免残留旧错误/旧页码)
+            // [v2.5.0] 重新进入原文模式时重置 PDF 渲染状态(避免残留旧错误)
+            // [v2.5.1] 保留 _pdfCurrentPage: 与文本模式共享页码
             _pdfController = null;
             _pdfPageCount = 0;
-            _pdfCurrentPage = 0;
             _pdfReady = false;
             _pdfError = null;
           }),
         ),
-      if (!_editing) ...[
-        IconButton(
-          icon: const Icon(Icons.library_music),
-          tooltip: '已生成音频',
-          onPressed: _exporting ? null : _showAudioFilesSheet,
-        ),
-        IconButton(
-          icon: _exporting
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.download_for_offline),
-          tooltip: '导出音频',
-          onPressed: _exporting ? null : () => _exportAudio(auto: false),
-        ),
-        IconButton(
-          icon: _translating
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.translate),
-          tooltip: '翻译',
-          onPressed: _translating ? null : _translate,
-        ),
-      ],
       IconButton(
-        icon: Icon(_editing ? Icons.check : Icons.edit),
-        tooltip: _editing ? '保存' : '编辑文字',
-        onPressed: _toggleEdit,
+        icon: const Icon(Icons.more_vert),
+        tooltip: '更多',
+        onPressed: () => Scaffold.of(context).openEndDrawer(),
       ),
     ];
-    return actions;
+  }
+
+  /// [v2.5.1] 文本模式操作收纳抽屉。
+  Widget _buildReaderDrawer() {
+    final editing = _editing;
+    return Drawer(
+      child: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Text(
+                editing ? '编辑文字' : '更多操作',
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+            if (editing) ...[
+              ListTile(
+                leading: const Icon(Icons.check),
+                title: const Text('保存'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _toggleEdit();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.close),
+                title: const Text('取消编辑'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  if (!mounted) return;
+                  setState(() {
+                    _editing = false;
+                    _editController.text = _displayText;
+                  });
+                },
+              ),
+            ] else ...[
+              ListTile(
+                leading: _translating
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.translate),
+                title: const Text('翻译当前句子'),
+                onTap: _translating
+                    ? null
+                    : () {
+                        Navigator.of(context).pop();
+                        _translate();
+                      },
+              ),
+              ListTile(
+                leading: const Icon(Icons.library_music),
+                title: const Text('已生成音频'),
+                onTap: _exporting
+                    ? null
+                    : () {
+                        Navigator.of(context).pop();
+                        _showAudioFilesSheet();
+                      },
+              ),
+              ListTile(
+                leading: _exporting
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.download_for_offline),
+                title: const Text('导出音频'),
+                onTap: _exporting
+                    ? null
+                    : () {
+                        Navigator.of(context).pop();
+                        _exportAudio(auto: false);
+                      },
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('编辑文字'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _toggleEdit();
+                },
+              ),
+            ],
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.close),
+              title: const Text('关闭'),
+              onTap: () => Navigator.of(context).pop(),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildEditor() {
@@ -715,6 +809,7 @@ class _ReaderPageState extends State<ReaderPage> {
             swipeHorizontal: true,
             autoSpacing: true,
             pageFling: false,
+            defaultPage: _pdfCurrentPage, // [v2.5.1] 从文本模式切回时恢复页码
             onRender: (pages) {
               if (!mounted) return;
               final pageCount = pages ?? 0;
@@ -756,6 +851,15 @@ class _ReaderPageState extends State<ReaderPage> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // [v2.5.1] 目录按钮(仅多页面文件显示)
+                  if (_pdfPageCount > 1) ...[
+                    FloatingActionButton.small(
+                      heroTag: 'pdf_toc',
+                      onPressed: _showPdfToc,
+                      child: const Icon(Icons.menu),
+                    ),
+                    const SizedBox(width: 12),
+                  ],
                   FloatingActionButton.small(
                     heroTag: 'pdf_prev',
                     onPressed: _pdfCurrentPage > 0
@@ -837,6 +941,8 @@ class _ReaderPageState extends State<ReaderPage> {
                       ],
                     ),
                   ),
+                  // [v2.5.1] 多页文件: 弹窗内页导航
+                  if (_isMultiPage) _buildSheetPageNav(),
                   const Divider(height: 1),
                   Expanded(
                     child: _buildTokenText(scrollController),
@@ -851,6 +957,109 @@ class _ReaderPageState extends State<ReaderPage> {
       // [v2.4.0] 面板关闭后清理引用
       _sheetRebuild = null;
     });
+  }
+
+  /// [v2.5.1] 文本弹窗内的页导航(多页文件, 参照原文翻页按钮)。
+  Widget _buildSheetPageNav() {
+    final total = _pageTexts?.length ?? 0;
+    if (total <= 1) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.chevron_left),
+            tooltip: '上一页',
+            onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+          ),
+          TextButton(
+            onPressed: _showPdfToc,
+            child: Text('第 ${_pdfCurrentPage + 1} / $total 页',
+                style: const TextStyle(fontSize: 14)),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.chevron_right),
+            tooltip: '下一页',
+            onPressed:
+                _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// [v2.5.1] 文本模式切换页面(多页文件): 重新切分当前页文本。
+  void _changePage(int delta) {
+    final total = _pageTexts?.length ?? 0;
+    if (total <= 1) return;
+    final next = (_pdfCurrentPage + delta).clamp(0, total - 1);
+    if (next == _pdfCurrentPage) return;
+    _tts.stop();
+    if (!mounted) return;
+    setState(() {
+      _pdfCurrentPage = next;
+      _contentRevision++;
+      _translationRequest++;
+      _translating = false;
+      _currentToken = -1;
+      _tokenKeys.clear();
+      _translations.clear(); // 页码变化后旧译文索引失效
+      _tts.setText(_displayText);
+    });
+    _sheetRebuild?.call();
+  }
+
+  /// [v2.5.1] PDF 目录弹窗(仅多页): 列出页码 + 每页文本摘要, 点击跳页。
+  void _showPdfToc() {
+    final pages = _pageTexts;
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Text('目录',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ),
+          for (int i = 0; i < _pdfPageCount; i++)
+            ListTile(
+              dense: true,
+              selected: i == _pdfCurrentPage,
+              leading: Text('${i + 1}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              title: Text(
+                (pages != null &&
+                        i < pages.length &&
+                        pages[i].trim().isNotEmpty)
+                    ? _previewLine(pages[i])
+                    : '第 ${i + 1} 页',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: i == _pdfCurrentPage
+                      ? Theme.of(context).colorScheme.primary
+                      : Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
+              onTap: () {
+                _pdfController?.setPage(i);
+                Navigator.of(context).pop();
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// [v2.5.1] 一行文本预览(压缩空白, 截断 40 字)。
+  String _previewLine(String text) {
+    final s = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return s.length <= 40 ? s : '${s.substring(0, 40)}…';
   }
 
   /// [v2.4.0] 可交互 token 文本: 点击朗读, 点击翻译在本句下方折叠译文
@@ -933,7 +1142,46 @@ class _ReaderPageState extends State<ReaderPage> {
     if (_tts.tokens.isEmpty) {
       return const Center(child: Text('没有可朗读的内容'));
     }
-    return _buildTokenText(_scrollController);
+    // [v2.5.1] 多页文件: 顶部页导航 + 当前页文本
+    return Column(
+      children: [
+        if (_isMultiPage) _buildPageNavBar(),
+        Expanded(child: _buildTokenText(_scrollController)),
+      ],
+    );
+  }
+
+  /// [v2.5.1] 文本模式页导航(参照原文翻页按钮): [‹] 第N/总 [›]
+  Widget _buildPageNavBar() {
+    final total = _pageTexts?.length ?? 0;
+    if (total <= 1) return const SizedBox.shrink();
+    return SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.chevron_left),
+              tooltip: '上一页',
+              onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+            ),
+            TextButton(
+              onPressed: _showPdfToc,
+              child: Text('第 ${_pdfCurrentPage + 1} / $total 页',
+                  style: const TextStyle(fontSize: 14)),
+            ),
+            IconButton(
+              icon: const Icon(Icons.chevron_right),
+              tooltip: '下一页',
+              onPressed:
+                  _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildControls() {

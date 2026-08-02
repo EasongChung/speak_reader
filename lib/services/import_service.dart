@@ -12,7 +12,11 @@ class ImportResult {
   final String content;
   final DocSource source;
   final String title;
-  ImportResult(this.content, this.source, this.title);
+
+  /// [v2.5.1] 多页面文件的分页文本(索引=页码-1); 非 PDF/单页为 null。
+  final List<String>? pageTexts;
+
+  ImportResult(this.content, this.source, this.title, {this.pageTexts});
 }
 
 /// [v2.5.0] PDF 无文本层(扫描件/纯图片版),需走逐页渲染 + 离线 OCR(Sprint 8)。
@@ -40,7 +44,7 @@ class ImportService {
       case 'docx':
         return ImportResult(await _readDocx(file), DocSource.word, name);
       case 'pdf':
-        return ImportResult(await _readPdf(file), DocSource.pdf, name);
+        return _readPdf(file);
       case 'txt':
       case 'text':
       case 'md':
@@ -89,21 +93,35 @@ class ImportService {
     return result;
   }
 
-  Future<String> _readPdf(File file) async {
+  /// [v2.5.1] 按页提取 PDF 文本层, 返回带分页文本的 [ImportResult]。
+  ///
+  /// 逐页调用 `PDFPage.text` 得到 `pageTexts`(索引=页码-1), 供阅读页
+  /// 按页面显示/朗读; `content` 仍为全文拼接(空行分隔), 保持旧行为兼容。
+  /// 单页提取失败不阻断整份导入(该页记空串, 阅读页可回退全文)。
+  Future<ImportResult> _readPdf(File file) async {
     try {
       final document = await PDFDoc.fromFile(file);
       if (document.length == 0) {
         throw const FormatException('PDF 为空');
       }
 
-      final text = (await document.text).trim();
+      final pages = <String>[];
+      for (final page in document.pages) {
+        try {
+          pages.add(await page.text);
+        } catch (_) {
+          pages.add(''); // 单页提取失败: 记空页, 不阻断整份导入
+        }
+      }
+      final text = pages.join('\n\n').trim();
       if (text.isEmpty) {
         // [v2.5.0] 扫描件: 改为抛专用异常, 由上层决定走离线 OCR 还是提示
         throw const PdfHasNoTextLayerException(
           '该 PDF 是扫描件(图片版),没有可提取的文字层。',
         );
       }
-      return text;
+      return ImportResult(text, DocSource.pdf, _fileName(file.path),
+          pageTexts: pages);
     } on FormatException {
       rethrow;
     } on PdfHasNoTextLayerException {
