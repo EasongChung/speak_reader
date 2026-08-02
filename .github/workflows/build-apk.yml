@@ -164,7 +164,8 @@ jobs:
           git tag -f "${TAG}"
           git push origin "refs/tags/${TAG}" --force
 
-      # [v2.5.1] 无条件发布 Release(update: true 幂等, 同版本重复构建时更新已存在 Release)
+      # [v2.5.1] 无条件发布 Release。TAG 含秒级时间戳保证唯一,
+      # 每次 push 都是新 Release, 无需 update(softprops@v2 无该输入)。
       - name: 发布到 Releases
         uses: softprops/action-gh-release@v2
         with:
@@ -179,4 +180,3 @@ jobs:
           files: build/app/outputs/flutter-apk/speak-reader-*-arm64-v8a.apk
           draft: false
           prerelease: false
-          update: true
