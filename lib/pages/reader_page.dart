@@ -68,6 +68,9 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   final _tokenKeys = <int, GlobalKey>{};
+  // [v2.5.3] 顶部「更多」抽屉按钮: 用 GlobalKey 打开 endDrawer,
+  // 修复 Scaffold.of(context) 在 AppBar actions 中找不到 Scaffold 的问题
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   @override
   void initState() {
@@ -531,6 +534,7 @@ class _ReaderPageState extends State<ReaderPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey, // [v2.5.3] 供「更多」抽屉按钮打开 endDrawer
       appBar: AppBar(
         title: GestureDetector(
           onTap: (_originalMode || _editing) ? null : _renameDialog,
@@ -579,7 +583,9 @@ class _ReaderPageState extends State<ReaderPage> {
       IconButton(
         icon: const Icon(Icons.more_vert),
         tooltip: '更多',
-        onPressed: () => Scaffold.of(context).openEndDrawer(),
+        // [v2.5.3] 用 Scaffold GlobalKey 打开抽屉:
+        // Scaffold.of(context) 在 AppBar actions 中向上找不到 Scaffold, 导致抽屉不弹出
+        onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
       ),
     ];
   }
@@ -847,9 +853,21 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         // 渲染中: 显示加载指示器
         if (!_pdfReady) const Center(child: CircularProgressIndicator()),
-        // 底部控制条: 目录(仅多页) + 上一页 + 页码(点击查看文本) + 下一页
-        // [v2.5.2] 目录按钮回控制组最左侧(与翻页组同行对齐, 风格一致), 整体居中
+        // [v2.5.3] 底部控制: 目录按钮独立定位在控制组左侧(left:16),
+        // 控制组仅 [‹][页码][›] 三键独立居中(页码在屏幕中线)
         if (_pdfReady) ...[
+          // 目录按钮(仅多页面文件显示): 独立位于左下, 与控制组同底边
+          if (_pdfPageCount > 1)
+            Positioned(
+              left: 16,
+              bottom: 24,
+              child: FloatingActionButton.small(
+                heroTag: 'pdf_toc',
+                onPressed: _showPdfToc,
+                child: const Icon(Icons.menu),
+              ),
+            ),
+          // 控制组: [‹][页码][›] 三键居中(页码按钮在屏幕中线)
           Positioned(
             left: 0,
             right: 0,
@@ -858,15 +876,6 @@ class _ReaderPageState extends State<ReaderPage> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // 目录按钮(仅多页面文件显示, 位于控制组最左)
-                  if (_pdfPageCount > 1) ...[
-                    FloatingActionButton.small(
-                      heroTag: 'pdf_toc',
-                      onPressed: _showPdfToc,
-                      child: const Icon(Icons.menu),
-                    ),
-                    const SizedBox(width: 12),
-                  ],
                   FloatingActionButton.small(
                     heroTag: 'pdf_prev',
                     onPressed: _pdfCurrentPage > 0
@@ -1181,46 +1190,55 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  /// [v2.5.2] 文本模式悬浮页导航: 复刻原文模式悬浮 FAB(bottom:24 居中)。
+  /// [v2.5.3] 文本模式悬浮页导航: 目录按钮独立定位在控制组左侧(left:16),
+  /// 控制组仅 [‹][页码][›] 三键独立居中(页码在屏幕中线), 与原文控制条同构。
   Widget _buildFloatingPageNav() {
     final total = _pageTexts?.length ?? 0;
     if (total <= 1) return const SizedBox.shrink();
-    // [v2.5.2] 复刻原文模式控制组布局: [目录] [‹] [页码] [›], 定位/风格一致
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 24,
-      child: Center(
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            FloatingActionButton.small(
-              heroTag: 'text_toc',
-              onPressed: _showPdfToc,
-              child: const Icon(Icons.menu),
-            ),
-            const SizedBox(width: 12),
-            FloatingActionButton.small(
-              heroTag: 'text_prev',
-              onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
-              child: const Icon(Icons.chevron_left),
-            ),
-            const SizedBox(width: 12),
-            FloatingActionButton.extended(
-              heroTag: 'text_page',
-              label: Text('${_pdfCurrentPage + 1} / $total'),
-              onPressed: _showPdfToc,
-            ),
-            const SizedBox(width: 12),
-            FloatingActionButton.small(
-              heroTag: 'text_next',
-              onPressed:
-                  _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
-              child: const Icon(Icons.chevron_right),
-            ),
-          ],
+    return Stack(
+      children: [
+        // 目录按钮: 独立位于左下, 与控制组同底边
+        Positioned(
+          left: 16,
+          bottom: 24,
+          child: FloatingActionButton.small(
+            heroTag: 'text_toc',
+            onPressed: _showPdfToc,
+            child: const Icon(Icons.menu),
+          ),
         ),
-      ),
+        // 控制组: [‹][页码][›] 三键居中(页码按钮在屏幕中线)
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 24,
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'text_prev',
+                  onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+                  child: const Icon(Icons.chevron_left),
+                ),
+                const SizedBox(width: 12),
+                FloatingActionButton.extended(
+                  heroTag: 'text_page',
+                  label: Text('${_pdfCurrentPage + 1} / $total'),
+                  onPressed: _showPdfToc,
+                ),
+                const SizedBox(width: 12),
+                FloatingActionButton.small(
+                  heroTag: 'text_next',
+                  onPressed:
+                      _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+                  child: const Icon(Icons.chevron_right),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 

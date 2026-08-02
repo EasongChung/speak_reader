@@ -37,11 +37,21 @@ class LlamaCppEngine implements InferenceEngine {
     // [v2.5.2] 加载前验证文件可读, 精确区分「权限不足」与「文件损坏/引擎不支持」。
     // Dart File.open 与 llama native fopen 同为 open(2), 若此处失败则 fopen 必失败,
     // 提示用户授权「所有文件访问」; 若此处通过而加载仍失败, 则是模型文件本身问题。
+    // [v2.5.3] 额外校验 GGUF 头(magic "GGUF"): 区分「权限不足」与「文件损坏/下载不完整」,
+    // 避免下载不完整的大文件在 native 层加载时才暴露。
     final file = File(model.path);
     try {
       final raf = file.openSync(mode: FileMode.read);
-      raf.closeSync();
-    } catch (_) {
+      try {
+        final magic = raf.readSync(4);
+        if (magic.length != 4 || !_isGgufMagic(magic)) {
+          throw Exception('模型文件损坏或非有效 GGUF(${model.fileName})\n'
+              '请删除后重新下载完整模型文件');
+        }
+      } finally {
+        raf.closeSync();
+      }
+    } on FileSystemException {
       throw Exception('模型文件无法读取(${model.fileName})\n'
           '请先在「设置 → 本地模型」授权「所有文件访问」后重试');
     }
@@ -59,7 +69,11 @@ class LlamaCppEngine implements InferenceEngine {
     final loadCommand = LlamaLoad(
       path: model.path,
       mmprojPath: model.mmprojPath,
-      modelParams: ModelParams()..nGpuLayers = 0, // CPU 优先, 稳定不 OOM
+      // [v2.5.3] 关闭 mmap: Android 分区存储/FUSE 文件系统上对 /storage/emulated/0
+      // (media 目录与 Download 都在其上) mmap 大模型常失败, 改为普通读取更稳定。
+      modelParams: ModelParams()
+        ..nGpuLayers = 0 // CPU 优先, 稳定不 OOM
+        ..useMemorymap = false,
       contextParams: contextParams,
       samplingParams: samplerParams,
     );
@@ -140,6 +154,15 @@ class LlamaCppEngine implements InferenceEngine {
   String _buildOcrPrompt() {
     return '请识别这张图片中的所有文字，只输出识别到的文字内容，'
         '保持原有段落顺序，不要添加任何解释。\n\n<image>';
+  }
+
+  /// [v2.5.3] 校验 GGUF 文件头 magic(4 字节 ASCII "GGUF")。
+  bool _isGgufMagic(List<int> bytes) {
+    return bytes.length >= 4 &&
+        bytes[0] == 0x47 && // G
+        bytes[1] == 0x47 && // G
+        bytes[2] == 0x55 && // U
+        bytes[3] == 0x46; // F
   }
 
   /// 清理模型输出: 去空白与常见杂讯。

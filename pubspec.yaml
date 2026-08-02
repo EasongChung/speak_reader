@@ -1,7 +1,7 @@
 name: speak_reader
 description: 语音朗读导入 App —— 拍照/扫描/Word/PDF/TXT 导入并语音朗读
 publish_to: 'none'
-version: 2.5.2+1
+version: 2.5.3
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
