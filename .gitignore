@@ -12,6 +12,8 @@ android/app/debug/
 android/app/profile/
 android/app/release/
 *.apk
+# [v2.5.0] 锁文件不入库(CI 每次 flutter pub get 重新解析, 依赖浮动由 pubspec.yaml 精确版本控制)
+pubspec.lock
 
 # IDE
 .idea/

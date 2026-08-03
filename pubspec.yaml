@@ -21,11 +21,17 @@ dependencies:
   # 选择文件(docx/pdf/txt)
   file_picker: ^8.1.2
 
-  # Word(.docx)转文本
-  docx_to_text: ^1.0.1
+  # [v2.5.0] docx 解压与 XML 解析(自研 docx 文本提取, 见 import_service._readDocx)
+  # 取代 docx_to_text: docx_to_text 锁 archive ^3.x 且已停更;
+  # 自研提取依赖 archive ^4 + xml ^6, 与 image 冲突无关(引擎已移除)。
+  archive: ^4.0.2
+  xml: ^6.0.1
 
   # PDF 文本层提取(Android 基于 PDFBox)
   flutter_pdf_text: 0.9.0
+
+  # [v2.5.0] PDF 原文真实渲染(翻页/缩放/页码, Android 基于 AndroidPdfViewer)
+  flutter_pdfview: 1.4.4
 
   # 运行时权限
   permission_handler: ^11.3.1
@@ -37,8 +43,13 @@ dependencies:
   http: ^1.2.2
 
   # 文件目录(音频导出输出路径)
-  path_provider: ^2.1.4
-  path: ^1.9.1
+  # 固定 2.1.5，配套 Android 实现锁定 2.2.16：兼容 Flutter 3.29.3，
+  # 保留 Android V2 PathProviderPlugin 注册，避免解析到仅支持 Flutter 3.35+
+  # 的 path_provider_android 2.3.x。
+  path_provider: 2.1.5
+  path_provider_android: 2.2.16
+  # Flutter 3.29.3 的 flutter_test 锁定 path 1.9.1。
+  path: 1.9.1
 
   # 分享/打开生成的音频文件
   # 需 >=10.0.1 才依赖 web ^1.0.0(与 file_picker 兼容);
@@ -51,6 +62,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+
+  # [v2.5.0] 测试: 替换 path_provider 平台实现(固定文档目录)
+  path_provider_platform_interface: ^2.1.2
 
 flutter:
   uses-material-design: true

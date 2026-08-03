@@ -1,8 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:docx_to_text/docx_to_text.dart';
+import 'package:archive/archive.dart';
 import 'package:flutter_pdf_text/flutter_pdf_text.dart';
+import 'package:xml/xml.dart';
 
 import '../models/document.dart';
 
@@ -11,7 +12,21 @@ class ImportResult {
   final String content;
   final DocSource source;
   final String title;
-  ImportResult(this.content, this.source, this.title);
+
+  /// [v2.5.1] 多页面文件的分页文本(索引=页码-1); 非 PDF/单页为 null。
+  final List<String>? pageTexts;
+
+  ImportResult(this.content, this.source, this.title, {this.pageTexts});
+}
+
+/// [v2.5.0] PDF 无文本层(扫描件/纯图片版),需走逐页渲染 + 离线 OCR(Sprint 8)。
+/// 单独类型便于上层捕获后触发扫描件 OCR 流程,而不是仅提示用户。
+class PdfHasNoTextLayerException implements Exception {
+  const PdfHasNoTextLayerException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 /// 文档导入服务:解析 .docx / .pdf / .txt 为纯文本。
@@ -29,7 +44,7 @@ class ImportService {
       case 'docx':
         return ImportResult(await _readDocx(file), DocSource.word, name);
       case 'pdf':
-        return ImportResult(await _readPdf(file), DocSource.pdf, name);
+        return _readPdf(file);
       case 'txt':
       case 'text':
       case 'md':
@@ -41,28 +56,75 @@ class ImportService {
     }
   }
 
+  /// [v2.5.0] 自研 docx 文本提取(docx = zip + WordprocessingML XML)。
+  ///
+  /// 取代 `docx_to_text`(该包锁 `archive ^3.x` 且已停更, 与 image 4.5.4 的
+  /// `archive ^4.x` 冲突)。提取 `word/document.xml` 的 `<w:t>` 文本,
+  /// 段落 `<w:p>` 之间换行; 缺失/空文档时抛带说明的异常。
   Future<String> _readDocx(File file) async {
     final bytes = await file.readAsBytes();
-    final text = docxToText(bytes);
-    return text.trim();
+    final archive = ZipDecoder().decodeBytes(bytes);
+
+    ArchiveFile? entry;
+    for (final f in archive.files) {
+      if (f.name == 'word/document.xml') {
+        entry = f;
+        break;
+      }
+    }
+    if (entry == null) {
+      throw Exception('docx 缺少 word/document.xml,文件可能已损坏');
+    }
+    // archive 4.x: content 恒非空(Uint8List)
+    final xmlText = utf8.decode(entry.content, allowMalformed: true);
+
+    const wNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    final doc = XmlDocument.parse(xmlText);
+    final buffer = StringBuffer();
+    for (final p in doc.findAllElements('p', namespace: wNs)) {
+      final text =
+          p.findAllElements('t', namespace: wNs).map((t) => t.innerText).join();
+      if (text.trim().isNotEmpty) buffer.writeln(text.trim());
+    }
+    final result = buffer.toString().trim();
+    if (result.isEmpty) {
+      throw Exception('docx 未提取到文本,请确认文件内容');
+    }
+    return result;
   }
 
-  Future<String> _readPdf(File file) async {
+  /// [v2.5.1] 按页提取 PDF 文本层, 返回带分页文本的 [ImportResult]。
+  ///
+  /// 逐页调用 `PDFPage.text` 得到 `pageTexts`(索引=页码-1), 供阅读页
+  /// 按页面显示/朗读; `content` 仍为全文拼接(空行分隔), 保持旧行为兼容。
+  /// 单页提取失败不阻断整份导入(该页记空串, 阅读页可回退全文)。
+  Future<ImportResult> _readPdf(File file) async {
     try {
       final document = await PDFDoc.fromFile(file);
       if (document.length == 0) {
         throw const FormatException('PDF 为空');
       }
 
-      final text = (await document.text).trim();
+      final pages = <String>[];
+      for (final page in document.pages) {
+        try {
+          pages.add(await page.text);
+        } catch (_) {
+          pages.add(''); // 单页提取失败: 记空页, 不阻断整份导入
+        }
+      }
+      final text = pages.join('\n\n').trim();
       if (text.isEmpty) {
-        throw const FormatException(
-          '该 PDF 可能是扫描件(图片版),没有可提取的文字层。\n'
-          '建议:把 PDF 页面截图后用「拍照/相册」导入做文字识别。',
+        // [v2.5.0] 扫描件: 改为抛专用异常, 由上层决定走离线 OCR 还是提示
+        throw const PdfHasNoTextLayerException(
+          '该 PDF 是扫描件(图片版),没有可提取的文字层。',
         );
       }
-      return text;
+      return ImportResult(text, DocSource.pdf, _fileName(file.path),
+          pageTexts: pages);
     } on FormatException {
+      rethrow;
+    } on PdfHasNoTextLayerException {
       rethrow;
     } catch (e) {
       throw Exception('无法打开该 PDF:$e');

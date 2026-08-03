@@ -2,11 +2,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'settings_service.dart';
+import 'translation_cache.dart';
 
-/// 翻译服务:调用 OpenAI 兼容的 chat/completions 接口。
+/// 翻译服务:在线 OpenAI 兼容 chat/completions。
 ///
-/// 兼容 OpenAI / DeepSeek / 通义千问 / 智谱 / Kimi 等——它们都提供
-/// `{baseURL}/chat/completions` 端点与 `Authorization: Bearer {key}` 鉴权。
+/// 共享句子级缓存(TranslationCache), 命中即返回, 不重复调用。
 class TranslationService {
   /// 把 [text] 翻译为 [targetLang](默认中文)。失败抛出带中文说明的异常。
   Future<String> translate(
@@ -14,11 +14,28 @@ class TranslationService {
     required AppSettings settings,
     String targetLang = '中文',
   }) async {
-    if (!settings.translationReady) {
-      throw Exception('未配置翻译 API,请先到「设置」填写接口地址和密钥');
-    }
     if (text.trim().isEmpty) {
       throw Exception('没有可翻译的内容');
+    }
+    // 句子级缓存: 命中即返回
+    final cached = await TranslationCache.get(text, targetLang: targetLang);
+    if (cached != null) return cached;
+
+    final result = await _translateOnline(text, settings, targetLang);
+    if (result.trim().isNotEmpty) {
+      await TranslationCache.put(text, result, targetLang: targetLang);
+    }
+    return result;
+  }
+
+  /// 在线通道: 调用 OpenAI 兼容 chat/completions。
+  Future<String> _translateOnline(
+    String text,
+    AppSettings settings,
+    String targetLang,
+  ) async {
+    if (!settings.translationReady) {
+      throw Exception('未配置翻译 API,请先到「设置」填写接口地址和密钥');
     }
 
     final url =

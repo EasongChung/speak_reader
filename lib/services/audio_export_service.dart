@@ -103,7 +103,8 @@ class AudioExportService {
             rate: rate, onProgress: onProgress, cancel: cancel);
       }
 
-      return _publish(candidatePath, finalPath);
+      // 必须 await：否则 finally 会先删除 jobDir，使 _publish 的候选 WAV 丢失。
+      return await _publish(candidatePath, finalPath);
     } finally {
       try {
         if (await jobDir.exists()) await jobDir.delete(recursive: true);
@@ -116,7 +117,7 @@ class AudioExportService {
     final finalFile = File(finalPath);
     if (await finalFile.exists()) {
       // 自动导出覆盖场景：exclusive rename 不支持覆盖，先移旧文件再 rename。
-      final backup = '${finalPath}.bak_${_randomToken()}';
+      final backup = '$finalPath.bak_${_randomToken()}';
       await finalFile.rename(backup);
       try {
         return (await candidate.rename(finalPath)).path;
@@ -272,9 +273,19 @@ class AudioExportService {
           .where((f) => f.path.toLowerCase().endsWith('.wav'))
           .where((f) => !p.basename(f.path).startsWith('.'))
           .toList();
-      files.sort(
-          (a, b) => b.statSync().modified.compareTo(a.statSync().modified));
-      return files;
+
+      // [v2.5.0] statSync → await stat: 大量文件时避免同步 IO 阻塞 UI 线程
+      final withTime = <(File, DateTime)>[];
+      for (final f in files) {
+        try {
+          final st = await f.stat();
+          withTime.add((f, st.modified));
+        } catch (_) {
+          // 单文件 stat 失败则跳过, 不因个别文件拖垮整个列表
+        }
+      }
+      withTime.sort((a, b) => b.$2.compareTo(a.$2));
+      return [for (final e in withTime) e.$1];
     } catch (_) {
       return [];
     }

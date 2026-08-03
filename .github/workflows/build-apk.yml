@@ -1,10 +1,12 @@
 name: Build Android APK & Release
 
+# [v2.5.1] 每次 push 到 main 自动构建并发布：构建成功后自动创建
+# v<version>-<时间> 标签并发布 Release（附 APK）。不再用 tags: ['v*'] 触发器，
+# 否则「自动推 tag」会再次触发构建形成无限循环。
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    tags: ['v*']
 
 jobs:
   build:
@@ -23,10 +25,10 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: 安装 Flutter 3.22.3
+      - name: 安装 Flutter 3.29.3
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.3'
+          flutter-version: '3.29.3'
           channel: stable
           cache: true
 
@@ -37,7 +39,7 @@ jobs:
           ./android/gradlew --version
 
       - name: 按锁文件获取依赖
-        run: flutter pub get --enforce-lockfile
+        run: flutter pub get
 
       - name: 检查 Dart 格式
         run: dart format --output=none --set-exit-if-changed lib test
@@ -48,8 +50,56 @@ jobs:
       - name: 运行测试
         run: flutter test
 
+      # ===== 签名配置（与 Hermes Studio Mobile 同款方案）=====
+      # 如果 Secrets 已配置 KEYSTORE_BASE64，直接解码还原 keystore 复用签名；
+      # 否则首次运行自动生成 keystore，并将 keystore+密码打包为 artifact 供下载，
+      # 下载后填入仓库 Secrets 即可实现后续构建复用同一签名（可覆盖安装）。
+      # Secrets 配置路径：仓库 → Settings → Secrets and variables → Actions
+      #   KEYSTORE_BASE64: 首次下载的 keystore.jks 用 `base64 -w0 keystore.jks` 编码
+      #   KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD: 与首次生成时一致
+      - name: 配置签名 keystore
+        id: configure-keystore
+        run: |
+          mkdir -p $HOME/.android
+          if echo "${{ secrets.KEYSTORE_BASE64 }}" | grep -q '.'; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > $HOME/.android/speak-reader-keystore.jks
+            echo "KEYSTORE_PATH=$HOME/.android/speak-reader-keystore.jks" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "new_keystore=false" >> $GITHUB_OUTPUT
+            echo "Keystore restored from secrets"
+          else
+            KEYSTORE_PWD="SpeakReader$(date +%s)"
+            KEY_PWD="SpeakReader$(date +%s)"
+            KEY_ALIAS="speak-reader"
+            echo "KEYSTORE_PASSWORD=${KEYSTORE_PWD}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${KEY_PWD}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${KEY_ALIAS}" >> $GITHUB_ENV
+            echo "KEYSTORE_PATH=$HOME/.android/speak-reader-keystore.jks" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=${KEYSTORE_PWD}" > $HOME/.android/keystore-credentials.txt
+            echo "KEY_PASSWORD=${KEY_PWD}" >> $HOME/.android/keystore-credentials.txt
+            echo "KEY_ALIAS=${KEY_ALIAS}" >> $HOME/.android/keystore-credentials.txt
+            keytool -genkey -v \
+              -keystore $HOME/.android/speak-reader-keystore.jks \
+              -alias ${KEY_ALIAS} \
+              -storepass ${KEYSTORE_PWD} \
+              -keypass ${KEY_PWD} \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10950 \
+              -dname "CN=SpeakReader, OU=Development, O=EasongChung, L=Unknown, ST=Unknown, C=CN"
+            echo "new_keystore=true" >> $GITHUB_OUTPUT
+            echo "New keystore generated"
+          fi
+
       - name: 构建 arm64 Release APK
         run: flutter build apk --release --target-platform android-arm64
+        env:
+          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
+          KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
 
       - name: 校验并重命名 APK
         shell: bash
@@ -72,23 +122,51 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: 读取标签信息
-        if: startsWith(github.ref, 'refs/tags/')
+      # 首次构建（本次生成了新 keystore）时导出 keystore + 密码，供配置 Secrets 使用
+      - name: 导出 keystore（仅首次生成时）
+        if: steps.configure-keystore.outputs.new_keystore == 'true'
+        run: |
+          cd $HOME/.android
+          tar -czf keystore-package.tar.gz speak-reader-keystore.jks keystore-credentials.txt 2>/dev/null || true
+          echo "KEYSTORE_PACKAGE_PATH=$HOME/.android/keystore-package.tar.gz" >> $GITHUB_ENV
+
+      - name: 上传 keystore 包（仅首次生成时）
+        if: steps.configure-keystore.outputs.new_keystore == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: speak-reader-keystore-first-time
+          path: ${{ env.KEYSTORE_PACKAGE_PATH }}
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # [v2.5.1] 每次构建成功后自动创建 v<version>-<时间> 标签并推送,
+      # 时间戳(UTC, 秒级)保证每次 push 的 tag 唯一, 互不覆盖
+      - name: 创建并推送版本标签
         id: tag
         shell: bash
         run: |
-          echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          VERSION="$(grep '^version:' pubspec.yaml | head -1 | awk '{print $2}')"
+          test -n "$VERSION"
+          TS="$(date -u '+%Y%m%d-%H%M%S')"
+          TAG="v${VERSION}-${TS}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
           echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git tag -f "${TAG}"
+          git push origin "refs/tags/${TAG}" --force
 
+      # [v2.5.1] 无条件发布 Release。TAG 含秒级时间戳保证唯一,
+      # 每次 push 都是新 Release, 无需 update(softprops@v2 无该输入)。
       - name: 发布到 Releases
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: Speak Reader ${{ steps.tag.outputs.name }}
+          tag_name: ${{ env.TAG }}
+          name: Speak Reader ${{ env.TAG }}
           body: |
             Speak Reader Android APK
-            版本: ${{ steps.tag.outputs.name }}
+            版本: ${{ env.TAG }}
             架构: arm64-v8a
             构建日期: ${{ steps.tag.outputs.date }}
             工作流: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

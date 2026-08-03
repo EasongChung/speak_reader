@@ -122,6 +122,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// 图片识别: 在线视觉模型。
   Future<void> _runOcr(
     String path,
     DocSource source, {
@@ -130,12 +131,14 @@ class _HomePageState extends State<HomePage> {
   }) async {
     try {
       final settings = await _settingsService.load();
-      if (!mounted) return;
       if (!settings.translationReady) {
-        _toast('图片识别需要先到「设置」配置 API(支持视觉的模型,如 gpt-4o、qwen-vl)');
+        if (!mounted) return;
+        _toast('图片识别需先到「设置」配置在线 API(支持视觉的模型,如 gpt-4o、qwen-vl)');
         return;
       }
+
       final text = await _visionOcr.recognizeFile(path, settings: settings);
+
       if (!mounted) return;
       if (text.trim().isEmpty) {
         _toast('未识别到文字,请换一张更清晰的图片');
@@ -145,7 +148,7 @@ class _HomePageState extends State<HomePage> {
       final originalPath = await _storage.copyOriginal(path, originalExtension);
       final doc = _newDoc(
         title: source == DocSource.camera ? '拍照识别' : '相册识别',
-        content: text,
+        content: text.trim(),
         source: source,
         originalFilePath: originalPath,
         originalFileMime: originalFileMime,
@@ -177,6 +180,12 @@ class _HomePageState extends State<HomePage> {
       if (path.toLowerCase().endsWith('.pdf')) {
         originalPath = await _storage.copyOriginal(path, 'pdf');
         originalMime = 'application/pdf';
+      } else if (path.toLowerCase().endsWith('.docx')) {
+        // [v2.5.2] docx 也保留原文件: 富排版文档默认进原文模式
+        // (原文视图暂不提供原样排版渲染, 显示提取文本, 顶栏保留「原文」开关)
+        originalPath = await _storage.copyOriginal(path, 'docx');
+        originalMime =
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       }
       final doc = _newDoc(
         title: imported.title,
@@ -184,6 +193,7 @@ class _HomePageState extends State<HomePage> {
         source: imported.source,
         originalFilePath: originalPath,
         originalFileMime: originalMime,
+        pageTexts: imported.pageTexts, // [v2.5.1] 多页 PDF 分页文本
       );
       await _commitAndOpen(doc, rollbackOriginalPath: originalPath);
     } catch (e) {
@@ -198,6 +208,8 @@ class _HomePageState extends State<HomePage> {
     // [v2.4.0] 原文文件信息（可选参数）
     String? originalFilePath,
     String? originalFileMime,
+    // [v2.5.1] 多页面文件分页文本（可选参数）
+    List<String>? pageTexts,
   }) {
     final now = DateTime.now();
     return Document(
@@ -208,6 +220,7 @@ class _HomePageState extends State<HomePage> {
       createdAt: now.millisecondsSinceEpoch,
       originalFilePath: originalFilePath,
       originalFileMime: originalFileMime,
+      pageTexts: pageTexts,
     );
   }
 

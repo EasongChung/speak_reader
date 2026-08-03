@@ -338,6 +338,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(width: 12),
               Expanded(
                 child: DropdownButtonFormField<AudioFormat>(
+                  // Flutter 3.29 使用 value；新 SDK 建议 initialValue。
+                  // ignore: deprecated_member_use
                   value: _s.audioFormat,
                   decoration: const InputDecoration(
                       isDense: true, border: OutlineInputBorder()),
