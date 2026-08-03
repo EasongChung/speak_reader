@@ -112,8 +112,9 @@ jobs:
 
       - name: 构建 arm64 Release APK
         # [v2.6.0] 注入递增版本号: versionName=2.5.x, versionCode=末位x(单调递增, 可覆盖安装)
-        run: flutter build apk --release --target-platform android-arm64 \
-          --build-name "$VERSION" --build-number "${VERSION##*.}"
+        # 注意: 不得使用反斜杠续行, YAML 普通标量会把换行折成空格,
+        # 导致 bash 把 '\ --build-name' 解析为带前导空格的字面参数而失败。
+        run: flutter build apk --release --target-platform android-arm64 --build-name "$VERSION" --build-number "${VERSION##*.}"
         env:
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
           KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
