@@ -405,9 +405,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 style: const TextStyle(color: Colors.grey, fontSize: 13)),
           ),
           const SizedBox(height: 8),
-          _repoLink(
-              Icons.code, '本仓库', 'https://github.com/EasongChung/speak_reader'),
-          _repoLink(Icons.star_border, '原创仓库',
+          // [v2.6.1] 居中单行「标签 + 图标 + <作者>/<仓库名>」超链接, 省略 URL 避免转行
+          _repoLink(Icons.code, '本仓库', 'EasongChung/speak_reader',
+              'https://github.com/EasongChung/speak_reader'),
+          _repoLink(Icons.star_border, '原创仓库', 'Aceworry/speak_reader',
               'https://github.com/Aceworry/speak_reader'),
           const SizedBox(height: 16),
         ],
@@ -416,7 +417,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   /// [v2.6.0] 单条仓库链接行: 图标 + 短标签 + 网址文本(整行可点击打开)。
-  Widget _repoLink(IconData icon, String label, String url) {
+  /// [v2.6.1] 标签 + 图标 + <作者>/<仓库名> 超链接, 居中单行不转行。
+  Widget _repoLink(IconData icon, String label, String short, String url) {
     return Center(
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
@@ -426,13 +428,15 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 18, color: Colors.grey),
-              const SizedBox(width: 8),
               Text(label,
                   style: const TextStyle(color: Colors.grey, fontSize: 13)),
               const SizedBox(width: 6),
+              Icon(icon, size: 16, color: Colors.grey),
+              const SizedBox(width: 6),
               Flexible(
-                child: Text(url,
+                child: Text(short,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         color: Colors.blueAccent,
                         fontSize: 13,

@@ -528,7 +528,10 @@ class _ReaderPageState extends State<ReaderPage> {
       appBar: AppBar(
         title: GestureDetector(
           onTap: (_originalMode || _editing) ? null : _renameDialog,
-          child: Text(_doc.title, overflow: TextOverflow.ellipsis),
+          // [v2.6.1] 阅读页标题字号改小(20→15), 其余保持不变
+          child: Text(_doc.title,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 15)),
         ),
         actions: _buildAppBarActions(),
       ),
@@ -738,21 +741,21 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         // 渲染中: 显示加载指示器
         if (!_pdfReady) const Center(child: CircularProgressIndicator()),
-        // [v2.5.3] 底部控制: 目录按钮独立定位在控制组左侧(left:16),
+        // [v2.5.3] 底部控制: 左侧按钮独立定位在控制组左侧(left:16),
         // 控制组仅 [‹][页码][›] 三键独立居中(页码在屏幕中线)
+        // [v2.6.1] 目录/文本按钮对调: 左侧=文本弹窗, 中间=页码兼目录(无图标)
         if (_pdfReady) ...[
-          // 目录按钮(仅多页面文件显示): 独立位于左下, 与控制组同底边
-          if (_pdfPageCount > 1)
-            Positioned(
-              left: 16,
-              bottom: 24,
-              child: FloatingActionButton.small(
-                heroTag: 'pdf_toc',
-                onPressed: _showPdfToc,
-                child: const Icon(Icons.menu),
-              ),
+          // 文本弹窗按钮: 独立位于左下, 与上下页控制按钮同底边对齐(bottom:24)
+          Positioned(
+            left: 16,
+            bottom: 24,
+            child: FloatingActionButton.small(
+              heroTag: 'pdf_view_text',
+              onPressed: _showTextSheet,
+              child: const Icon(Icons.text_fields),
             ),
-          // 控制组: [‹][页码][›] 三键居中(页码按钮在屏幕中线)
+          ),
+          // 控制组: [‹][页码(点击显示目录)][›] 三键居中(页码按钮在屏幕中线)
           Positioned(
             left: 0,
             right: 0,
@@ -770,10 +773,9 @@ class _ReaderPageState extends State<ReaderPage> {
                   ),
                   const SizedBox(width: 12),
                   FloatingActionButton.extended(
-                    heroTag: 'view_text',
-                    icon: const Icon(Icons.text_fields, size: 18),
+                    heroTag: 'pdf_toc',
                     label: Text('${_pdfCurrentPage + 1} / $_pdfPageCount'),
-                    onPressed: _showTextSheet,
+                    onPressed: _showPdfToc,
                   ),
                   const SizedBox(width: 12),
                   FloatingActionButton.small(
@@ -843,8 +845,9 @@ class _ReaderPageState extends State<ReaderPage> {
                       ],
                     ),
                   ),
-                  // [v2.5.1] 多页文件: 弹窗内页导航
-                  if (_isMultiPage) _buildSheetPageNav(),
+                  // [v2.5.1] 弹窗内页导航栏
+                  // [v2.6.1] 单页文件也显示编辑/翻译按钮(_buildSheetPageNav 内部处理)
+                  _buildSheetPageNav(),
                   const Divider(height: 1),
                   Expanded(
                     child: _buildTokenText(scrollController),
@@ -862,9 +865,11 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// [v2.5.1] 文本弹窗内的页导航(多页文件, 参照原文翻页按钮)。
+  /// [v2.6.1] 页导航栏左侧增加编辑按钮、右侧增加翻译按钮;
+  /// 单页文件也显示编辑/翻译(中间无页码翻页)。
   Widget _buildSheetPageNav() {
     final total = _pageTexts?.length ?? 0;
-    if (total <= 1) return const SizedBox.shrink();
+    final multi = total > 1;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(
@@ -872,21 +877,35 @@ class _ReaderPageState extends State<ReaderPage> {
         children: [
           IconButton(
             visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.chevron_left),
-            tooltip: '上一页',
-            onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+            icon: const Icon(Icons.edit_outlined, size: 20),
+            tooltip: '编辑文字',
+            onPressed: _toggleEdit,
           ),
-          TextButton(
-            onPressed: _showPdfToc,
-            child: Text('第 ${_pdfCurrentPage + 1} / $total 页',
-                style: const TextStyle(fontSize: 14)),
-          ),
+          if (multi) ...[
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.chevron_left),
+              tooltip: '上一页',
+              onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+            ),
+            TextButton(
+              onPressed: _showPdfToc,
+              child: Text('第 ${_pdfCurrentPage + 1} / $total 页',
+                  style: const TextStyle(fontSize: 14)),
+            ),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.chevron_right),
+              tooltip: '下一页',
+              onPressed:
+                  _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+            ),
+          ],
           IconButton(
             visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.chevron_right),
-            tooltip: '下一页',
-            onPressed:
-                _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+            icon: const Icon(Icons.translate, size: 20),
+            tooltip: '翻译当前句',
+            onPressed: _translate,
           ),
         ],
       ),
@@ -1131,7 +1150,8 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// 工具栏按钮对应的完整功能名(点击气泡提示用)。
   String _toolbarLabel(int index) {
-    const labels = ['听写模式', '翻译当前句子', '已生成音频', '导出音频', '编辑文字'];
+    // [v2.6.1] 按钮顺序已倒序, 标签数组同步倒序(气泡提示跟随正确按钮)
+    const labels = ['编辑文字', '导出音频', '已生成音频', '翻译当前句子', '听写模式'];
     return labels[index];
   }
 
@@ -1139,21 +1159,21 @@ class _ReaderPageState extends State<ReaderPage> {
   Widget _buildToolbar() {
     final dictation = _tts.dictationMode;
     return Row(
+      // [v2.6.1] 按钮顺序倒序排列: [编辑][导出][已生成][翻译][听写]
       mainAxisAlignment: MainAxisAlignment.spaceAround,
       children: [
         _toolbarButton(
           0,
-          Icons.spellcheck,
-          '听写模式',
-          active: dictation,
-          onTap: () => _toggleDictation(!dictation),
+          Icons.edit,
+          '编辑',
+          onTap: () => _toggleEdit(),
         ),
         _toolbarButton(
           1,
-          Icons.translate,
-          '翻译',
-          loading: _translating,
-          onTap: _translating ? null : () => _translate(),
+          Icons.download_for_offline,
+          '导出',
+          loading: _exporting,
+          onTap: _exporting ? null : () => _exportAudio(auto: false),
         ),
         _toolbarButton(
           2,
@@ -1163,16 +1183,17 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         _toolbarButton(
           3,
-          Icons.download_for_offline,
-          '导出',
-          loading: _exporting,
-          onTap: _exporting ? null : () => _exportAudio(auto: false),
+          Icons.translate,
+          '翻译',
+          loading: _translating,
+          onTap: _translating ? null : () => _translate(),
         ),
         _toolbarButton(
           4,
-          Icons.edit,
-          '编辑',
-          onTap: () => _toggleEdit(),
+          Icons.spellcheck,
+          '听写模式',
+          active: dictation,
+          onTap: () => _toggleDictation(!dictation),
         ),
       ],
     );
