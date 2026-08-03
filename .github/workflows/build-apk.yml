@@ -17,6 +17,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # [v2.6.0] 全量拉取历史与 tags, 用于计算本次版本号(已发布最大 2.5.x +1)
+          fetch-depth: 0
 
       - name: 安装 Java 17
         uses: actions/setup-java@v4
@@ -37,6 +40,20 @@ jobs:
           flutter --version
           java -version
           ./android/gradlew --version
+
+      # [v2.6.0] 计算本次构建版本号: 取已发布最大 2.5.x 自动 +1(无则 2.5.1)。
+      # 通过 flutter build --build-name/--build-number 注入, 不改动 pubspec(避免循环触发)。
+      - name: 计算并注入版本号
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAX=$(git tag -l 'v2.5.*' | sed -E 's/^v2\.5\.([0-9]+).*/\1/' | sort -n | tail -1 || true)
+          if [ -z "$MAX" ]; then MAX=0; fi
+          VERSION="2.5.$((MAX + 1))"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "本次构建版本: ${VERSION}"
 
       - name: 按锁文件获取依赖
         run: flutter pub get
@@ -94,7 +111,9 @@ jobs:
           fi
 
       - name: 构建 arm64 Release APK
-        run: flutter build apk --release --target-platform android-arm64
+        # [v2.6.0] 注入递增版本号: versionName=2.5.x, versionCode=末位x(单调递增, 可覆盖安装)
+        run: flutter build apk --release --target-platform android-arm64 \
+          --build-name "$VERSION" --build-number "${VERSION##*.}"
         env:
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
           KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
@@ -107,7 +126,6 @@ jobs:
           set -euo pipefail
           SOURCE="build/app/outputs/flutter-apk/app-release.apk"
           test -s "$SOURCE"
-          VERSION=$(perl -ne 'print $1 if /^version:\s*([^+\s]+)/' pubspec.yaml)
           test -n "$VERSION"
           DEST="build/app/outputs/flutter-apk/speak-reader-${VERSION}-${GITHUB_SHA::7}-arm64-v8a.apk"
           mv "$SOURCE" "$DEST"
@@ -146,7 +164,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(grep '^version:' pubspec.yaml | head -1 | awk '{print $2}')"
           test -n "$VERSION"
           TS="$(date -u '+%Y%m%d-%H%M%S')"
           TAG="v${VERSION}-${TS}"

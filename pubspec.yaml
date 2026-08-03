@@ -1,7 +1,9 @@
 name: speak_reader
 description: 语音朗读导入 App —— 拍照/扫描/Word/PDF/TXT 导入并语音朗读
 publish_to: 'none'
-version: 2.4.0+1
+# [v2.6.0] 版本号基准 2.5.1(不再用 +build 表达); 每次云端构建由 CI 自动递增末位,
+# 通过 flutter build --build-name/--build-number 注入, 不改动本文件。
+version: 2.5.1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -55,6 +57,12 @@ dependencies:
   # 需 >=10.0.1 才依赖 web ^1.0.0(与 file_picker 兼容);
   # 又需 <12.0.0 避免强制 AGP>=8.12/Kotlin2.2 拖累 CI。
   share_plus: ^10.1.0
+
+  # [v2.6.0] 打开设置页的仓库 GitHub 链接
+  url_launcher: ^6.3.1
+
+  # [v2.6.0] 设置页底部实时显示应用版本号(随 CI 构建号递增)
+  package_info_plus: ^8.0.0
 
   # [v2.4.0] 移除: google_mlkit_translation/google_mlkit_language_id (~15MB,国产机不可用)
 

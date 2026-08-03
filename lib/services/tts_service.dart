@@ -28,12 +28,12 @@ class TtsService {
   bool dictationMode = false;
 
   // 常规模式参数
-  double speechRate = 0.5; // 0.1~1.0
+  double speechRate = 0.5; // [v2.6.0] 0.1~3.0 (部分引擎 100% 仍偏慢,放宽到 300%)
 
   // 听写模式参数
   int repeatCount = 2;
   double dictationGapSeconds = 2.0;
-  double dictationRate = 0.4; // 听写单词语速(部分单词读太快,独立于常规语速)
+  double dictationRate = 0.4; // 听写单词语速(部分单词读太快,独立于常规语速) 0.1~3.0
   double repeatGapSeconds = 0.6; // 同一词多遍重复之间的间隔(可配置)
   bool loop = false;
 
@@ -207,7 +207,7 @@ class TtsService {
 
   /// 实时调整常规模式语速(播放中立即重读当前句生效)
   Future<void> setSpeechRate(double rate) async {
-    speechRate = rate.clamp(0.1, 1.0);
+    speechRate = rate.clamp(0.1, 3.0); // [v2.6.0] 上限放宽到 300%
     await _tts.setSpeechRate(speechRate);
     if (_state == TtsState.playing && !dictationMode) {
       // 重读当前句以应用新语速
@@ -222,7 +222,7 @@ class TtsService {
 
   /// 实时调整听写模式单词语速(播放中从当前词重新生效)
   Future<void> setDictationRate(double rate) async {
-    dictationRate = rate.clamp(0.1, 1.0);
+    dictationRate = rate.clamp(0.1, 3.0); // [v2.6.0] 上限放宽到 300%
     await _tts.setSpeechRate(dictationRate);
     if (_state == TtsState.playing && dictationMode) {
       _playToken++;

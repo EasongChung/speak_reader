@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -67,9 +68,9 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   final _tokenKeys = <int, GlobalKey>{};
-  // [v2.5.3] 顶部「更多」抽屉按钮: 用 GlobalKey 打开 endDrawer,
-  // 修复 Scaffold.of(context) 在 AppBar actions 中找不到 Scaffold 的问题
-  final _scaffoldKey = GlobalKey<ScaffoldState>();
+  // [v2.6.0] 底部工具栏各入口按钮的定位 key, 用于点击时在按钮上方弹出气泡提示
+  final List<GlobalKey> _toolbarKeys = List.generate(5, (_) => GlobalKey());
+  Timer? _bubbleTimer;
 
   @override
   void initState() {
@@ -524,7 +525,6 @@ class _ReaderPageState extends State<ReaderPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      key: _scaffoldKey, // [v2.5.3] 供「更多」抽屉按钮打开 endDrawer
       appBar: AppBar(
         title: GestureDetector(
           onTap: (_originalMode || _editing) ? null : _renameDialog,
@@ -532,8 +532,6 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         actions: _buildAppBarActions(),
       ),
-      // [v2.5.1] 文本模式顶部操作收纳抽屉(需求: 顶部仅保留切换原文 + 更多)
-      endDrawer: _buildReaderDrawer(),
       body: _originalMode
           ? _buildOriginalReader()
           : (_editing ? _buildEditor() : _buildReader()),
@@ -542,7 +540,8 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// [v2.4.0] 根据模式构建 AppBar 按钮
-  /// [v2.5.1] 文本模式顶部仅保留「原文」切换 + 「更多(抽屉)」, 其余操作收纳抽屉
+  /// [v2.6.0] 文本模式顶部仅保留「原文」切换(抽屉及其「更多」入口已移除,
+  /// 原收纳的翻译/导出/编辑等操作已移至底部工具栏)
   List<Widget> _buildAppBarActions() {
     if (_originalMode) {
       // [v2.4.0] 原文模式: 仅「文本模式」切换
@@ -554,9 +553,9 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
       ];
     }
-    // [v2.5.1] 文本模式: 顶部仅「原文」切换(有原文时) + 「更多」按钮
-    return [
-      if (_doc.hasOriginal && !_editing) // [v2.4.0] 有原文时显示切换按钮
+    // [v2.4.0] 有原文时显示「原文」切换按钮
+    if (_doc.hasOriginal && !_editing) {
+      return [
         IconButton(
           icon: const Icon(Icons.image),
           tooltip: '原文',
@@ -570,113 +569,9 @@ class _ReaderPageState extends State<ReaderPage> {
             _pdfError = null;
           }),
         ),
-      IconButton(
-        icon: const Icon(Icons.more_vert),
-        tooltip: '更多',
-        // [v2.5.3] 用 Scaffold GlobalKey 打开抽屉:
-        // Scaffold.of(context) 在 AppBar actions 中向上找不到 Scaffold, 导致抽屉不弹出
-        onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
-      ),
-    ];
-  }
-
-  /// [v2.5.1] 文本模式操作收纳抽屉。
-  Widget _buildReaderDrawer() {
-    final editing = _editing;
-    return Drawer(
-      child: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-              child: Text(
-                editing ? '编辑文字' : '更多操作',
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-            ),
-            if (editing) ...[
-              ListTile(
-                leading: const Icon(Icons.check),
-                title: const Text('保存'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _toggleEdit();
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.close),
-                title: const Text('取消编辑'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  if (!mounted) return;
-                  setState(() {
-                    _editing = false;
-                    _editController.text = _displayText;
-                  });
-                },
-              ),
-            ] else ...[
-              ListTile(
-                leading: _translating
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.translate),
-                title: const Text('翻译当前句子'),
-                onTap: _translating
-                    ? null
-                    : () {
-                        Navigator.of(context).pop();
-                        _translate();
-                      },
-              ),
-              ListTile(
-                leading: const Icon(Icons.library_music),
-                title: const Text('已生成音频'),
-                onTap: _exporting
-                    ? null
-                    : () {
-                        Navigator.of(context).pop();
-                        _showAudioFilesSheet();
-                      },
-              ),
-              ListTile(
-                leading: _exporting
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.download_for_offline),
-                title: const Text('导出音频'),
-                onTap: _exporting
-                    ? null
-                    : () {
-                        Navigator.of(context).pop();
-                        _exportAudio(auto: false);
-                      },
-              ),
-              ListTile(
-                leading: const Icon(Icons.edit),
-                title: const Text('编辑文字'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _toggleEdit();
-                },
-              ),
-            ],
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.close),
-              title: const Text('关闭'),
-              onTap: () => Navigator.of(context).pop(),
-            ),
-          ],
-        ),
-      ),
-    );
+      ];
+    }
+    return const [];
   }
 
   Widget _buildEditor() {
@@ -1232,6 +1127,152 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
+  // ---------------- [v2.6.0] 底部工具栏 ----------------
+
+  /// 工具栏按钮对应的完整功能名(点击气泡提示用)。
+  String _toolbarLabel(int index) {
+    const labels = ['听写模式', '翻译当前句子', '已生成音频', '导出音频', '编辑文字'];
+    return labels[index];
+  }
+
+  /// 底部工具栏: 一排入口按钮, 替代原「听写模式开关独占行」。
+  Widget _buildToolbar() {
+    final dictation = _tts.dictationMode;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceAround,
+      children: [
+        _toolbarButton(
+          0,
+          Icons.spellcheck,
+          '听写模式',
+          active: dictation,
+          onTap: () => _toggleDictation(!dictation),
+        ),
+        _toolbarButton(
+          1,
+          Icons.translate,
+          '翻译',
+          loading: _translating,
+          onTap: _translating ? null : () => _translate(),
+        ),
+        _toolbarButton(
+          2,
+          Icons.library_music,
+          '已生成',
+          onTap: _exporting ? null : () => _showAudioFilesSheet(),
+        ),
+        _toolbarButton(
+          3,
+          Icons.download_for_offline,
+          '导出',
+          loading: _exporting,
+          onTap: _exporting ? null : () => _exportAudio(auto: false),
+        ),
+        _toolbarButton(
+          4,
+          Icons.edit,
+          '编辑',
+          onTap: () => _toggleEdit(),
+        ),
+      ],
+    );
+  }
+
+  /// 单个工具栏按钮: 图标 + 下方小字; 点击在按钮上方浮出气泡提示并执行操作。
+  Widget _toolbarButton(
+    int index,
+    IconData icon,
+    String label, {
+    bool active = false,
+    bool loading = false,
+    VoidCallback? onTap,
+  }) {
+    final accent =
+        active ? Theme.of(context).colorScheme.primary : Colors.black87;
+    return InkWell(
+      key: _toolbarKeys[index],
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap == null
+          ? null
+          : () {
+              _showToolbarBubble(_toolbarKeys[index], _toolbarLabel(index));
+              onTap();
+            },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              height: 22,
+              child: loading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : Icon(icon, size: 24, color: accent),
+            ),
+            const SizedBox(height: 2),
+            Text(label,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: accent,
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// [v2.6.0] 在指定工具栏按钮上方浮出一个短暂气泡(约 1.2s), 显示功能名。
+  void _showToolbarBubble(GlobalKey key, String text) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize || !mounted) return;
+    final overlay = Overlay.of(context);
+    final size = box.size;
+    final pos = box.localToGlobal(Offset.zero);
+    final screenW = MediaQuery.of(context).size.width;
+
+    const bubbleH = 32.0;
+    final painter = TextPainter(
+      text: TextSpan(
+          text: text,
+          style: const TextStyle(fontSize: 13, color: Colors.white)),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final bubbleW = (painter.width + 24).clamp(44.0, screenW - 16.0);
+    var left = pos.dx + size.width / 2 - bubbleW / 2;
+    left = left.clamp(8.0, screenW - bubbleW - 8.0);
+
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: left,
+        top: (pos.dy - bubbleH - 6) < 0 ? 0 : (pos.dy - bubbleH - 6),
+        child: IgnorePointer(
+          child: Container(
+            height: bubbleH,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.75),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(text,
+                style: const TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(entry);
+    _bubbleTimer?.cancel();
+    _bubbleTimer = Timer(const Duration(milliseconds: 1200), () {
+      entry.remove();
+      _bubbleTimer = null;
+    });
+  }
+
   Widget _buildControls() {
     final playing = _state == TtsState.playing;
     final dictation = _tts.dictationMode;
@@ -1241,16 +1282,9 @@ class _ReaderPageState extends State<ReaderPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 听写模式开关
-            Row(
-              children: [
-                const Icon(Icons.spellcheck, size: 20),
-                const SizedBox(width: 8),
-                const Text('听写模式'),
-                const Spacer(),
-                Switch(value: dictation, onChanged: _toggleDictation),
-              ],
-            ),
+            // [v2.6.0] 底部工具栏: 原「听写模式开关独占行」改造成一排入口按钮
+            _buildToolbar(),
+            const SizedBox(height: 4),
             // 常规模式:语速滑块;听写模式:书写停顿滑块
             Row(
               children: [
@@ -1270,10 +1304,11 @@ class _ReaderPageState extends State<ReaderPage> {
                               setState(() => _tts.dictationGapSeconds = v),
                         )
                       : Slider(
-                          value: _tts.speechRate.clamp(0.1, 1.0),
+                          value:
+                              _tts.speechRate.clamp(0.1, 3.0), // [v2.6.0] 300%
                           min: 0.1,
-                          max: 1.0,
-                          divisions: 9,
+                          max: 3.0,
+                          divisions: 29,
                           label: '${(_tts.speechRate * 100).round()}%',
                           onChanged: (v) =>
                               setState(() => _tts.setSpeechRate(v)),
@@ -1290,10 +1325,11 @@ class _ReaderPageState extends State<ReaderPage> {
                   const Text('单词语速'),
                   Expanded(
                     child: Slider(
-                      value: _tts.dictationRate.clamp(0.1, 1.0),
+                      value:
+                          _tts.dictationRate.clamp(0.1, 3.0), // [v2.6.0] 300%
                       min: 0.1,
-                      max: 1.0,
-                      divisions: 9,
+                      max: 3.0,
+                      divisions: 29,
                       label: '${(_tts.dictationRate * 100).round()}%',
                       onChanged: (v) =>
                           setState(() => _tts.setDictationRate(v)),

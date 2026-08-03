@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/audio_export_service.dart';
 import '../services/settings_service.dart';
@@ -22,6 +24,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _obscureKey = true;
   bool _testing = false;
   String? _outputDir;
+  String _appVersion = '2.5.1'; // [v2.6.0] 运行时版本号,initState 加载后实时更新
   int _loadRequest = 0;
   int _directoryRequest = 0;
   int _testRequest = 0;
@@ -37,6 +40,16 @@ class _SettingsPageState extends State<SettingsPage> {
     _keyCtrl = TextEditingController();
     _modelCtrl = TextEditingController();
     _load();
+    _loadVersion();
+  }
+
+  /// [v2.6.0] 读取运行时版本号(版本名),显示在页面底部;失败则保留默认值。
+  Future<void> _loadVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (!mounted) return;
+      setState(() => _appVersion = info.version);
+    } catch (_) {}
   }
 
   Future<void> _load() async {
@@ -266,10 +279,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
           _sectionTitle('朗读参数'),
           _slider(
-            '常规模式·语速',
+            '常规模式·语速(部分引擎偏慢可调至 300%)',
             _s.speechRate,
             0.1,
-            1.0,
+            3.0, // [v2.6.0] 上限放宽到 300%
             (v) => setState(() => _s.speechRate = v),
             '${(_s.speechRate * 100).round()}%',
           ),
@@ -279,7 +292,7 @@ class _SettingsPageState extends State<SettingsPage> {
             '听写·单词语速(部分单词读太快可调慢)',
             _s.dictationRate,
             0.1,
-            1.0,
+            3.0, // [v2.6.0] 上限放宽到 300%
             (v) => setState(() => _s.dictationRate = v),
             '${(_s.dictationRate * 100).round()}%',
           ),
@@ -384,9 +397,59 @@ class _SettingsPageState extends State<SettingsPage> {
             style: const TextStyle(color: Colors.grey, fontSize: 13),
           ),
           const SizedBox(height: 24),
+
+          // [v2.6.0] 版本信息 + 仓库链接(本 fork 与原创仓库)
+          const Divider(height: 40),
+          Center(
+            child: Text('语音朗读 v$_appVersion',
+                style: const TextStyle(color: Colors.grey, fontSize: 13)),
+          ),
+          const SizedBox(height: 8),
+          _repoLink(
+              Icons.code, '本仓库', 'https://github.com/EasongChung/speak_reader'),
+          _repoLink(Icons.star_border, '原创仓库',
+              'https://github.com/Aceworry/speak_reader'),
+          const SizedBox(height: 16),
         ],
       ),
     );
+  }
+
+  /// [v2.6.0] 单条仓库链接行: 图标 + 短标签 + 网址文本(整行可点击打开)。
+  Widget _repoLink(IconData icon, String label, String url) {
+    return Center(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => _openUrl(url),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 18, color: Colors.grey),
+              const SizedBox(width: 8),
+              Text(label,
+                  style: const TextStyle(color: Colors.grey, fontSize: 13)),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(url,
+                    style: const TextStyle(
+                        color: Colors.blueAccent,
+                        fontSize: 13,
+                        decoration: TextDecoration.underline)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// [v2.6.0] 用系统浏览器打开指定网址(href 超链接)。
+  Future<void> _openUrl(String url) async {
+    final ok =
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    if (!ok && mounted) _toast('无法打开链接,请手动访问:$url');
   }
 
   Widget _sectionTitle(String t) => Padding(
