@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_pdfview/flutter_pdfview.dart';
 
@@ -11,6 +12,7 @@ import '../services/tts_service.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_service.dart';
+import '../services/vision_ocr_service.dart';
 // [v2.4.0] 移除: offline_translation_service(ML Kit 已删除)
 
 class ReaderPage extends StatefulWidget {
@@ -28,6 +30,8 @@ class _ReaderPageState extends State<ReaderPage> {
   final _translation = TranslationService();
   // [v2.4.0] 移除: _offlineTranslation
   final _audioExport = AudioExportService();
+  // [v2.6.2] 在线视觉模型 OCR 补充识别
+  final _visionOcr = VisionOcrService();
   final _scrollController = ScrollController();
 
   late Document _doc;
@@ -41,6 +45,8 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _translating = false;
   bool _exporting = false;
   bool _exportCancelled = false;
+  // [v2.6.2] OCR 补充识别进行中
+  bool _ocrBusy = false;
   // [v2.4.0] 句子折叠翻译: 已展开译文的 token index → 译文文本
   final Map<int, String> _translations = {};
   // [v2.4.0] 底部文本面板的刷新回调(StatefulBuilder setSheet)
@@ -69,7 +75,8 @@ class _ReaderPageState extends State<ReaderPage> {
 
   final _tokenKeys = <int, GlobalKey>{};
   // [v2.6.0] 底部工具栏各入口按钮的定位 key, 用于点击时在按钮上方弹出气泡提示
-  final List<GlobalKey> _toolbarKeys = List.generate(5, (_) => GlobalKey());
+  // [v2.6.2] 6 个按钮: [编辑][导出][已生成][OCR][翻译][听写]
+  final List<GlobalKey> _toolbarKeys = List.generate(6, (_) => GlobalKey());
   Timer? _bubbleTimer;
 
   @override
@@ -610,17 +617,14 @@ class _ReaderPageState extends State<ReaderPage> {
               ),
             ),
           ),
+          // [v2.6.2] 与 PDF 原文一致: 左下角小按钮打开文本弹窗(不再用居中大按键)
           Positioned(
-            left: 0,
-            right: 0,
+            left: 16,
             bottom: 24,
-            child: Center(
-              child: FloatingActionButton.extended(
-                heroTag: 'view_text',
-                icon: const Icon(Icons.text_fields),
-                label: const Text('查看文本'),
-                onPressed: _showTextSheet,
-              ),
+            child: FloatingActionButton.small(
+              heroTag: 'img_view_text',
+              onPressed: _showTextSheet,
+              child: const Icon(Icons.text_fields),
             ),
           ),
         ],
@@ -806,16 +810,18 @@ class _ReaderPageState extends State<ReaderPage> {
             if (mounted) setSheet(() {});
           };
           return DraggableScrollableSheet(
+            // [v2.6.2] 放宽高度下限: 最低可调到 1/4 屏幕(0.25)
             initialChildSize: 0.55,
-            minChildSize: 0.3,
+            minChildSize: 0.25,
             maxChildSize: 0.85,
             expand: false,
             builder: (context, scrollController) {
               return Column(
                 children: [
                   // 拖拽手柄
+                  // [v2.6.2] 压缩顶部行间距(紧凑布局)
                   Container(
-                    margin: const EdgeInsets.symmetric(vertical: 8),
+                    margin: const EdgeInsets.symmetric(vertical: 4),
                     width: 40,
                     height: 4,
                     decoration: BoxDecoration(
@@ -824,18 +830,23 @@ class _ReaderPageState extends State<ReaderPage> {
                     ),
                   ),
                   Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    // [v2.6.2] 紧凑: 减小水平留白, 取消标题行垂直内边距
+                    padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
                     child: Row(
                       children: [
-                        const Icon(Icons.text_fields, size: 18),
-                        const SizedBox(width: 8),
+                        const Icon(Icons.text_fields, size: 16),
+                        const SizedBox(width: 6),
                         const Text('识别的文字',
                             style: TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.bold)),
+                                fontSize: 14, fontWeight: FontWeight.bold)),
                         const Spacer(),
                         TextButton.icon(
-                          icon: const Icon(Icons.close, size: 18),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 0),
+                          ),
+                          icon: const Icon(Icons.close, size: 16),
                           label: const Text('关闭'),
                           onPressed: () {
                             _sheetRebuild = null;
@@ -1148,10 +1159,122 @@ class _ReaderPageState extends State<ReaderPage> {
 
   // ---------------- [v2.6.0] 底部工具栏 ----------------
 
+  /// [v2.6.2] OCR 补充识别: 收集文档内图片(docx 的 word/media/* 或图片原文原图),
+  /// 用在线视觉模型逐张识别, 结果追加到文档内容末尾并保存。
+  Future<void> _ocrSupplement() async {
+    if (_ocrBusy) return;
+    if (!_settings.translationReady) {
+      _toast('OCR 识别需先到「设置」配置在线 API(支持视觉的模型,如 gpt-4o、qwen-vl)');
+      return;
+    }
+    final images = await _collectOcrImages();
+    if (images.isEmpty) {
+      if (mounted) _toast('当前文档没有可识别的图片');
+      return;
+    }
+    setState(() => _ocrBusy = true);
+    final results = <String>[];
+    try {
+      for (var i = 0; i < images.length; i++) {
+        try {
+          final text =
+              await _visionOcr.recognizeFile(images[i], settings: _settings);
+          if (text.trim().isNotEmpty) results.add(text.trim());
+        } catch (e) {
+          debugPrint('[v2.6.2] 第 ${i + 1}/${images.length} 张图片识别失败: $e');
+        }
+      }
+    } finally {
+      // 清理临时解压的 docx 图片(原图不删)
+      for (final p in images) {
+        if (p != _doc.originalFilePath) {
+          try {
+            final f = File(p);
+            if (await f.exists()) await f.delete();
+          } catch (_) {}
+        }
+      }
+      if (mounted) setState(() => _ocrBusy = false);
+    }
+    if (results.isEmpty) {
+      if (mounted) _toast('未识别到新文字(请确认模型支持图片输入)');
+      return;
+    }
+    final ocrText = results.join('\n\n');
+    // 追加到文档内容; 多页文件追加到当前页, 并同步拼接全文
+    final pages = _pageTexts;
+    if (pages != null && pages.isNotEmpty) {
+      final i = _pdfCurrentPage.clamp(0, pages.length - 1);
+      pages[i] = pages[i].trim().isEmpty
+          ? ocrText
+          : '${pages[i]}\n\n[补充OCR]\n$ocrText';
+      _doc.content = pages.join('\n\n').trim();
+    } else {
+      _doc.content = _doc.content.trim().isEmpty
+          ? ocrText
+          : '${_doc.content}\n\n[补充OCR]\n$ocrText';
+    }
+    _contentRevision++;
+    _translationRequest++;
+    _translating = false;
+    _translations.clear();
+    _tokenKeys.clear();
+    _tts.setText(_displayText);
+    await _storage.upsert(_doc);
+    if (!mounted) return;
+    _toast('已补充识别 ${results.length} 张图片文字');
+    _sheetRebuild?.call();
+  }
+
+  /// [v2.6.2] 收集待 OCR 的图片路径: 图片原文直接取原图; docx 解压
+  /// word/media/ 下的图片到临时目录返回; 其它类型返回空。
+  Future<List<String>> _collectOcrImages() async {
+    final orig = _doc.originalFilePath;
+    if (orig == null || orig.isEmpty) return const [];
+    if (_doc.isImageOriginal) return [orig];
+    if (orig.toLowerCase().endsWith('.docx')) {
+      try {
+        final bytes = await File(orig).readAsBytes();
+        final zip = ZipDecoder().decodeBytes(bytes);
+        final tempDir =
+            await Directory.systemTemp.createTemp('speak_reader_ocr_');
+        final paths = <String>[];
+        try {
+          for (final f in zip.files) {
+            final n = f.name;
+            if (!n.startsWith('word/media/')) continue;
+            final lower = n.toLowerCase();
+            if (!(lower.endsWith('.png') ||
+                lower.endsWith('.jpg') ||
+                lower.endsWith('.jpeg') ||
+                lower.endsWith('.webp') ||
+                lower.endsWith('.bmp'))) {
+              continue;
+            }
+            final out = File('${tempDir.path}/${n.split('/').last}');
+            await out.writeAsBytes(f.content);
+            paths.add(out.path);
+          }
+        } finally {
+          if (paths.isEmpty) {
+            try {
+              await tempDir.delete();
+            } catch (_) {}
+          }
+        }
+        return paths;
+      } catch (e) {
+        debugPrint('[v2.6.2] docx 解压图片失败: $e');
+        return const [];
+      }
+    }
+    return const [];
+  }
+
   /// 工具栏按钮对应的完整功能名(点击气泡提示用)。
   String _toolbarLabel(int index) {
-    // [v2.6.1] 按钮顺序已倒序, 标签数组同步倒序(气泡提示跟随正确按钮)
-    const labels = ['编辑文字', '导出音频', '已生成音频', '翻译当前句子', '听写模式'];
+    // [v2.6.1] 按钮顺序倒序, [v2.6.2] 插入 OCR; 标签数组同步(气泡提示跟随正确按钮)
+    const labels = ['编辑文字', '导出音频', '已生成音频', '补充识别图片', '翻译当前句子', '听写模式'];
     return labels[index];
   }
 
@@ -1159,7 +1282,7 @@ class _ReaderPageState extends State<ReaderPage> {
   Widget _buildToolbar() {
     final dictation = _tts.dictationMode;
     return Row(
-      // [v2.6.1] 按钮顺序倒序排列: [编辑][导出][已生成][翻译][听写]
+      // [v2.6.1] 按钮顺序倒序排列, [v2.6.2] 插入 OCR: [编辑][导出][已生成][OCR][翻译][听写]
       mainAxisAlignment: MainAxisAlignment.spaceAround,
       children: [
         _toolbarButton(
@@ -1183,13 +1306,20 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         _toolbarButton(
           3,
+          Icons.document_scanner,
+          'OCR',
+          loading: _ocrBusy,
+          onTap: _ocrBusy ? null : () => _ocrSupplement(),
+        ),
+        _toolbarButton(
+          4,
           Icons.translate,
           '翻译',
           loading: _translating,
           onTap: _translating ? null : () => _translate(),
         ),
         _toolbarButton(
-          4,
+          5,
           Icons.spellcheck,
           '听写模式',
           active: dictation,
