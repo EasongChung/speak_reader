@@ -408,7 +408,19 @@ class _HomePageState extends State<HomePage> {
             ),
             confirmDismiss: (_) => _deleteDoc(doc),
             child: ListTile(
-              leading: CircleAvatar(child: Text(doc.source.label)),
+              // [v2.6.3] 圆内文字用 FittedBox 缩放适配, 避免 Word 等标签转行/溢出圆
+              leading: CircleAvatar(
+                child: Padding(
+                  padding: const EdgeInsets.all(3),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(doc.source.label,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: const TextStyle(fontSize: 11)),
+                  ),
+                ),
+              ),
               title:
                   Text(doc.title, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Text('${doc.createdAtText}\n${doc.preview}',

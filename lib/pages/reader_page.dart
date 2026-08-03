@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_pdfview/flutter_pdfview.dart';
 
 import '../models/document.dart';
@@ -33,6 +34,10 @@ class _ReaderPageState extends State<ReaderPage> {
   // [v2.6.2] 在线视觉模型 OCR 补充识别
   final _visionOcr = VisionOcrService();
   final _scrollController = ScrollController();
+  // [v2.6.3] 文本弹窗内容独立滚动控制器(高度由顶部手柄拖动控制)
+  final _sheetScrollController = ScrollController();
+  // [v2.6.3] 文本弹窗高度(占屏比例, 可拖动顶部手柄在 0.25~0.85 间调整)
+  double _sheetHeight = 0.55;
 
   late Document _doc;
   AppSettings _settings = AppSettings();
@@ -146,6 +151,7 @@ class _ReaderPageState extends State<ReaderPage> {
     // [v2.5.0] PDF 原生视图由组件自行回收, 仅清理状态引用
     _pdfController = null;
     _scrollController.dispose();
+    _sheetScrollController.dispose();
     _editController.dispose();
     super.dispose();
   }
@@ -799,7 +805,11 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// [v2.4.0] 底部弹出文本面板: 可点击句子 → 朗读, 点击翻译折叠展开译文
+  /// [v2.6.3] 高度改为通过顶部手柄边缘上下拖动调整(0.25~0.85 屏高),
+  /// 文本内容在窗口内独立滚动; 顶部采用紧凑布局。
   void _showTextSheet() {
+    _sheetHeight = 0.55;
+    if (_sheetScrollController.hasClients) _sheetScrollController.jumpTo(0);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -809,63 +819,71 @@ class _ReaderPageState extends State<ReaderPage> {
           _sheetRebuild = () {
             if (mounted) setSheet(() {});
           };
-          return DraggableScrollableSheet(
-            // [v2.6.2] 放宽高度下限: 最低可调到 1/4 屏幕(0.25)
-            initialChildSize: 0.55,
-            minChildSize: 0.25,
-            maxChildSize: 0.85,
-            expand: false,
-            builder: (context, scrollController) {
-              return Column(
-                children: [
-                  // 拖拽手柄
-                  // [v2.6.2] 压缩顶部行间距(紧凑布局)
-                  Container(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[400],
-                      borderRadius: BorderRadius.circular(2),
+          final screenH = MediaQuery.of(context).size.height;
+          return SizedBox(
+            height: screenH * _sheetHeight,
+            child: Column(
+              children: [
+                // 顶部拖拽手柄: 上下拖动实时调整弹窗高度(不影响文本滚动)
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onVerticalDragUpdate: (d) {
+                    setSheet(() {
+                      _sheetHeight = (_sheetHeight - d.delta.dy / screenH)
+                          .clamp(0.25, 0.85);
+                    });
+                  },
+                  child: Container(
+                    height: 20,
+                    alignment: Alignment.center,
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[400],
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
                   ),
-                  Padding(
-                    // [v2.6.2] 紧凑: 减小水平留白, 取消标题行垂直内边距
-                    padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.text_fields, size: 16),
-                        const SizedBox(width: 6),
-                        const Text('识别的文字',
-                            style: TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.bold)),
-                        const Spacer(),
-                        TextButton.icon(
-                          style: TextButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 0),
-                          ),
-                          icon: const Icon(Icons.close, size: 16),
-                          label: const Text('关闭'),
-                          onPressed: () {
-                            _sheetRebuild = null;
-                            Navigator.of(context).pop();
-                          },
+                ),
+                // 标题行(紧凑)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.text_fields, size: 16),
+                      const SizedBox(width: 6),
+                      const Text('识别的文字',
+                          style: TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.bold)),
+                      const Spacer(),
+                      TextButton.icon(
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 0),
+                          minimumSize: const Size(0, 0),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                      ],
-                    ),
+                        icon: const Icon(Icons.close, size: 16),
+                        label: const Text('关闭'),
+                        onPressed: () {
+                          _sheetRebuild = null;
+                          Navigator.of(context).pop();
+                        },
+                      ),
+                    ],
                   ),
-                  // [v2.5.1] 弹窗内页导航栏
-                  // [v2.6.1] 单页文件也显示编辑/翻译按钮(_buildSheetPageNav 内部处理)
-                  _buildSheetPageNav(),
-                  const Divider(height: 1),
-                  Expanded(
-                    child: _buildTokenText(scrollController),
-                  ),
-                ],
-              );
-            },
+                ),
+                // [v2.5.1] 弹窗内页导航栏
+                // [v2.6.1] 单页文件也显示编辑/翻译按钮(_buildSheetPageNav 内部处理)
+                _buildSheetPageNav(),
+                const Divider(height: 1),
+                Expanded(
+                  child: _buildTokenText(_sheetScrollController),
+                ),
+              ],
+            ),
           );
         },
       ),
@@ -878,48 +896,55 @@ class _ReaderPageState extends State<ReaderPage> {
   /// [v2.5.1] 文本弹窗内的页导航(多页文件, 参照原文翻页按钮)。
   /// [v2.6.1] 页导航栏左侧增加编辑按钮、右侧增加翻译按钮;
   /// 单页文件也显示编辑/翻译(中间无页码翻页)。
+  /// [v2.6.3] 按钮收紧到 36px 约束, 配合紧凑弹窗顶部布局。
   Widget _buildSheetPageNav() {
     final total = _pageTexts?.length ?? 0;
     final multi = total > 1;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.edit_outlined, size: 20),
-            tooltip: '编辑文字',
-            onPressed: _toggleEdit,
-          ),
+          _compactIcon(Icons.edit_outlined, '编辑文字', _toggleEdit),
           if (multi) ...[
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.chevron_left),
-              tooltip: '上一页',
-              onPressed: _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
+            _compactIcon(
+              Icons.chevron_left,
+              '上一页',
+              _pdfCurrentPage > 0 ? () => _changePage(-1) : null,
             ),
             TextButton(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                minimumSize: const Size(0, 0),
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
               onPressed: _showPdfToc,
               child: Text('第 ${_pdfCurrentPage + 1} / $total 页',
-                  style: const TextStyle(fontSize: 14)),
+                  style: const TextStyle(fontSize: 13)),
             ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.chevron_right),
-              tooltip: '下一页',
-              onPressed:
-                  _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
+            _compactIcon(
+              Icons.chevron_right,
+              '下一页',
+              _pdfCurrentPage < total - 1 ? () => _changePage(1) : null,
             ),
           ],
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.translate, size: 20),
-            tooltip: '翻译当前句',
-            onPressed: _translate,
-          ),
+          _compactIcon(Icons.translate, '翻译当前句', _translate),
         ],
       ),
+    );
+  }
+
+  /// [v2.6.3] 紧凑图标按钮: 36px 触控约束、18px 图标, 用于弹窗顶部。
+  Widget _compactIcon(IconData icon, String tooltip, VoidCallback? onTap) {
+    return IconButton(
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      iconSize: 18,
+      icon: Icon(icon),
+      tooltip: tooltip,
+      onPressed: onTap,
     );
   }
 
@@ -1159,8 +1184,8 @@ class _ReaderPageState extends State<ReaderPage> {
 
   // ---------------- [v2.6.0] 底部工具栏 ----------------
 
-  /// [v2.6.2] OCR 补充识别: 收集文档内图片(docx 的 word/media/* 或图片原文原图),
-  /// 用在线视觉模型逐张识别, 结果追加到文档内容末尾并保存。
+  /// [v2.6.2] OCR 补充识别: 收集文档内图片(docx 的 word/media/* / 图片原文原图 /
+  /// [v2.6.3] PDF 当前页渲染图), 用在线视觉模型逐张识别, 结果追加到文档内容末尾并保存。
   Future<void> _ocrSupplement() async {
     if (_ocrBusy) return;
     if (!_settings.translationReady) {
@@ -1226,12 +1251,48 @@ class _ReaderPageState extends State<ReaderPage> {
     _sheetRebuild?.call();
   }
 
-  /// [v2.6.2] 收集待 OCR 的图片路径: 图片原文直接取原图; docx 解压
-  /// word/media/ 下的图片到临时目录返回; 其它类型返回空。
+  // [v2.6.3] PDF 页面渲染 MethodChannel(见 android/.../MainActivity.kt)
+  static const _pdfRenderChannel =
+      MethodChannel('com.example.speak_reader/pdf_render');
+
+  /// [v2.6.3] 渲染 PDF 指定页为 PNG 字节流(白底, 2x 缩放), 失败返回 null。
+  Future<Uint8List?> _renderPdfPage(int pageIndex) async {
+    final path = _doc.originalFilePath;
+    if (path == null || path.isEmpty) return null;
+    try {
+      final bytes = await _pdfRenderChannel.invokeMethod<Uint8List>(
+        'renderPage',
+        {'path': path, 'pageIndex': pageIndex, 'scale': 2.0},
+      );
+      return bytes;
+    } catch (e) {
+      debugPrint('[v2.6.3] PDF 页面渲染失败: $e');
+      return null;
+    }
+  }
+
+  /// [v2.6.2] 收集待 OCR 的图片路径: 图片原文直接取原图; PDF 用系统
+  /// 渲染器把当前页转成 PNG; docx 解压 word/media/ 下的图片到临时目录返回。
+  /// [v2.6.3] 其它类型返回空。
   Future<List<String>> _collectOcrImages() async {
     final orig = _doc.originalFilePath;
     if (orig == null || orig.isEmpty) return const [];
     if (_doc.isImageOriginal) return [orig];
+    if (_doc.isPdfOriginal) {
+      // [v2.6.3] 渲染当前页为 PNG 再识别(表格/扫描页以图片形式补识别)
+      final bytes = await _renderPdfPage(_pdfCurrentPage);
+      if (bytes == null) return const [];
+      try {
+        final tempDir =
+            await Directory.systemTemp.createTemp('speak_reader_ocr_');
+        final out = File('${tempDir.path}/page_${_pdfCurrentPage + 1}.png');
+        await out.writeAsBytes(bytes);
+        return [out.path];
+      } catch (e) {
+        debugPrint('[v2.6.3] PDF 页面图片写入失败: $e');
+        return const [];
+      }
+    }
     if (orig.toLowerCase().endsWith('.docx')) {
       try {
         final bytes = await File(orig).readAsBytes();
