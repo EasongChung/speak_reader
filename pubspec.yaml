@@ -33,7 +33,12 @@ dependencies:
   flutter_pdf_text: 0.9.0
 
   # [v2.5.0] PDF 原文真实渲染(翻页/缩放/页码, Android 基于 AndroidPdfViewer)
-  flutter_pdfview: 1.4.4
+  # [G2] 已 vendoring 进本仓库, 不再作为 Pub 依赖:
+  #   - Dart 侧 lib/vendor/flutter_pdfview/flutter_pdfview.dart
+  #   - 原生侧 android/app/src/main/java/io/endigo/plugins/pdfviewflutter/
+  # 原因: 点击朗读需要上游未暴露的 onTap / onDraw。底层渲染库
+  # io.github.oothp:android-pdf-viewer 改由 android/app/build.gradle 直接声明。
+  # flutter_pdfview: 1.4.4
 
   # 运行时权限
   permission_handler: ^11.3.1

@@ -115,3 +115,40 @@ speak_reader/
 ## 六、备注
 - `.doc`(旧版 Word)不被支持,请在电脑上另存为 `.docx` 再导入。
 - Release 版目前用 debug 签名以便直接安装;正式上架请在 `android/app/build.gradle` 配置你自己的签名。
+
+---
+
+## 七、第三方代码引用
+
+本项目内含以下第三方代码副本(vendoring)。原始许可声明已随代码完整保留,
+下列改动均为适配本项目的点击朗读功能所需。
+
+### flutter_pdfview 1.4.4
+
+- **来源**:https://github.com/endigo/flutter_pdfview
+- **许可**:MIT License, Copyright (c) 2019 endigo
+  (全文见 `android/app/src/main/java/io/endigo/plugins/pdfviewflutter/LICENSE`)
+- **本仓库位置**:
+  - Dart 侧 `lib/vendor/flutter_pdfview/flutter_pdfview.dart`
+  - 原生侧 `android/app/src/main/java/io/endigo/plugins/pdfviewflutter/`
+- **为何 vendoring 而非直接依赖**:实现「点击文本即朗读并高亮」需要底层
+  AndroidPdfViewer 的 `OnTapListener` 与 `OnDrawListener`,而上游插件未将这两个
+  回调暴露给 Flutter 侧,无法通过配置或继承绕过。
+- **改动清单**:
+  1. 接上 `.onTap()`,把点击位置换算为页面坐标(PDF 点)回传 Flutter;
+  2. 接上 `.onDraw()`,新增高亮框绘制;
+  3. 新增 `setHighlights` / `clearHighlights` 两个 MethodChannel 方法;
+  4. 平台视图注册名改为 `speak_reader/pdfview`,并改由 `MainActivity` 手工注册
+     (移除 Pub 依赖后上游的插件自动注册不再生效);
+  5. Dart 侧移除 iOS 分支——本项目仅支持 Android,未 vendoring iOS 实现;
+  6. 未 vendoring 上游的 `PDFViewFlutterPlugin.java`(其职责已由第 4 点接管)。
+
+### AndroidPdfViewer(io.github.oothp:android-pdf-viewer:3.2.0-beta05)
+
+- **许可**:Apache License 2.0, Copyright 2016 Bartosz Schiller
+- **引入方式**:Gradle 依赖,**未复制其源码**(见 `android/app/build.gradle`)
+- **例外**:`android/app/src/main/java/com/github/barteksc/pdfviewer/PdfViewGeometryBridge.java`
+  是本项目新写的桥接类,因需访问包内可见字段 `PDFView.pdfFile` 而必须置于该库的
+  包名下,文件头部保留了 Apache-2.0 声明。它同时修正了上游一处缺陷:
+  `drawWithListener` 在竖向滚动时将次轴偏移写死为 0,与实际绘页所用的居中偏移
+  不一致,导致文档各页宽度不等时覆盖层水平错位。

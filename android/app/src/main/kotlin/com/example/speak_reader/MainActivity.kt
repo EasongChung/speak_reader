@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import com.tom_roush.pdfbox.pdmodel.PDDocument
+import io.endigo.plugins.pdfviewflutter.PDFViewFactory
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -18,8 +19,19 @@ class MainActivity : FlutterActivity() {
     // [G1] 复用同一通道新增字符坐标提取与描框校验
     private val pdfRenderChannel = "com.example.speak_reader/pdf_render"
 
+    // [G2] PDF 平台视图注册名, 与 lib/vendor/flutter_pdfview 中的 _kViewType 一致
+    private val pdfViewType = "speak_reader/pdfview"
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // [G2] flutter_pdfview 已 vendoring 进本仓库并从 pubspec 移除, 其原有的
+        // 插件自动注册(GeneratedPluginRegistrant)随之失效, 故在此手工注册平台视图。
+        // 遗漏此处会导致 PDF 原文视图空白。
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            pdfViewType,
+            PDFViewFactory(flutterEngine.dartExecutor.binaryMessenger),
+        )
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, pdfRenderChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

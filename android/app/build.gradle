@@ -94,4 +94,9 @@ dependencies {
     // 模块获得编译期可见性; 版本与其严格一致, 避免 Gradle 版本仲裁引入第二份。
     // APK 体积增长为 0。
     implementation 'com.tom-roush:pdfbox-android:2.0.27.0'
+
+    // [G2] PDF 渲染视图。原由 flutter_pdfview 1.4.4 的插件模块传递引入, 该插件
+    // 已 vendoring 进本仓库(android/app/src/main/java/io/endigo/, lib/vendor/)
+    // 并从 pubspec 移除, 故改由 app 模块直接声明。版本与上游一致, APK 体积不变。
+    implementation 'io.github.oothp:android-pdf-viewer:3.2.0-beta05'
 }

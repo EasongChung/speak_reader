@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_pdfview/flutter_pdfview.dart';
 
 import '../models/document.dart';
 import '../services/audio_export_service.dart'
@@ -14,6 +13,9 @@ import '../services/storage_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_service.dart';
 import '../services/vision_ocr_service.dart';
+// [G2] 已 vendoring 到本仓库, 不再走 pub 依赖: 点击朗读需要上游未暴露的
+// onTap / onDraw(详见 lib/vendor/flutter_pdfview/flutter_pdfview.dart)
+import '../vendor/flutter_pdfview/flutter_pdfview.dart';
 // [v2.4.0] 移除: offline_translation_service(ML Kit 已删除)
 
 class ReaderPage extends StatefulWidget {
@@ -747,6 +749,8 @@ class _ReaderPageState extends State<ReaderPage> {
             onViewCreated: (vc) {
               _pdfController = vc;
             },
+            // [G2] 点击原文 → 命中字符 → 画高亮框(校验用, 暂不接 TTS)
+            onTap: _onPdfTap,
           ),
         ),
         // 渲染中: 显示加载指示器
@@ -1273,6 +1277,52 @@ class _ReaderPageState extends State<ReaderPage> {
     } catch (e) {
       debugPrint('[v2.6.3] PDF 页面渲染失败: $e');
       return null;
+    }
+  }
+
+  /// [G2] 点击原文 → 命中字符 → 画高亮框(Gate 2 校验用, 暂不接 TTS)。
+  ///
+  /// [details] 的坐标与 PDFBox `extractTextPositions` 同一坐标系(页面点,
+  /// 原点在 CropBox 左上角), 故可直接与字符框比对, 无需任何换算。
+  /// 竖直范围沿用 Gate 1 实测定论的固定 em 框(上 0.88 / 下 0.12)。
+  ///
+  /// 本关只验证「点中的字 == 画框的字」在缩放/平移/翻页下是否始终成立;
+  /// 命中后接 TTS 朗读是 Gate 3 的范围, 混进来会让失败原因不可归因。
+  Future<void> _onPdfTap(PdfTapDetails details) async {
+    final path = _doc.originalFilePath;
+    if (path == null || path.isEmpty || !_doc.isPdfOriginal) return;
+
+    try {
+      final data = await _pdfRenderChannel.invokeMapMethod<String, dynamic>(
+        'extractTextPositions',
+        {'path': path, 'pageIndex': details.page},
+      );
+      final chars = (data?['chars'] as List?) ?? const [];
+
+      // 命中判定: x 落在字符前进宽度内, y 落在 em 框内
+      for (final c in chars.cast<Map>()) {
+        final x = (c['x'] as num).toDouble();
+        final y = (c['y'] as num).toDouble();
+        final w = (c['w'] as num).toDouble();
+        final fs = (c['fs'] as num).toDouble();
+        final top = y - 0.88 * fs;
+        final bottom = y + 0.12 * fs;
+        if (details.x >= x &&
+            details.x <= x + w &&
+            details.y >= top &&
+            details.y <= bottom) {
+          await _pdfController?.setHighlights(
+            details.page,
+            [Rect.fromLTRB(x, top, x + w, bottom)],
+          );
+          _toast('命中「${c['c']}」');
+          return;
+        }
+      }
+      // 未命中(点在空白处): 清除上一次的框, 便于观察对齐是否漂移
+      await _pdfController?.clearHighlights();
+    } catch (e) {
+      debugPrint('[G2] 点击命中失败: $e');
     }
   }
 
