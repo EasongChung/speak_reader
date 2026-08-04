@@ -1278,9 +1278,10 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// [G1] 字符坐标校验入口(长按原文模式页码按钮触发)。
   ///
-  /// 让原生侧用 PDFBox 取当前页字符坐标, 直接描在系统渲染图上返回 PNG,
-  /// 用于肉眼确认坐标映射公式是否正确(是否需要 CropBox 平移 / 旋转补偿、
-  /// `yDirAdj` 是否为字形下沿)。仅开发校验用, 不参与正式朗读流程。
+  /// 让原生侧用 PDFBox 取当前页字符坐标, 直接描在系统渲染图上返回 PNG。
+  /// 首轮实测已确认 x/宽度/CropBox/旋转四项正确, `y` 为基线; 本轮用于比对
+  /// 竖直范围的三套取法(见 mode), 选出对中英文都贴合的那套。
+  /// 仅开发校验用, 不参与正式朗读流程。
   Future<void> _showCharBoxDebug() async {
     final path = _doc.originalFilePath;
     if (path == null || path.isEmpty || !_doc.isPdfOriginal) {
@@ -1288,11 +1289,10 @@ class _ReaderPageState extends State<ReaderPage> {
       return;
     }
     final pageIndex = _pdfCurrentPage;
-    Uint8List? png;
     int charCount = -1;
-    String? error;
+    double aspect = 0;
     try {
-      // 先取元信息(字符数)便于在标题上直接看出文本层是否存在
+      // 先取元信息(字符数与页面比例)便于标题展示与首屏完整显示
       final meta = await _pdfRenderChannel
           .invokeMapMethod<String, Object?>('extractTextPositions', {
         'path': path,
@@ -1300,41 +1300,102 @@ class _ReaderPageState extends State<ReaderPage> {
       });
       final chars = meta?['chars'];
       if (chars is List) charCount = chars.length;
-      png = await _pdfRenderChannel.invokeMethod<Uint8List>(
-        'debugAnnotatePage',
-        {'path': path, 'pageIndex': pageIndex, 'scale': 2.0},
-      );
+      final pw = (meta?['pageWidth'] as num?)?.toDouble() ?? 0;
+      final ph = (meta?['pageHeight'] as num?)?.toDouble() ?? 0;
+      if (pw > 0 && ph > 0) aspect = pw / ph;
     } catch (e) {
-      error = '$e';
-      debugPrint('[G1] 坐标校验失败: $e');
+      debugPrint('[G1] 坐标元信息读取失败: $e');
     }
     if (!mounted) return;
-    if (png == null) {
-      _toast(error == null ? '当前页无法生成校验图' : '坐标校验失败: $error');
-      return;
+
+    // 三套竖直范围方案: 字体度量(默认) / 固定 em 框 / getHeightDir 对照
+    const modes = <String, String>{
+      'font': '字体度量',
+      'em': 'em 框',
+      'h': 'heightDir',
+    };
+    var mode = 'font';
+
+    Future<Uint8List?> render(String m) async {
+      try {
+        return await _pdfRenderChannel.invokeMethod<Uint8List>(
+          'debugAnnotatePage',
+          {'path': path, 'pageIndex': pageIndex, 'scale': 2.0, 'mode': m},
+        );
+      } catch (e) {
+        debugPrint('[G1] 坐标校验失败($m): $e');
+        return null;
+      }
     }
-    final bytes = png;
+
     await showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(
-          '坐标校验 · 第 ${pageIndex + 1} 页'
-          '${charCount >= 0 ? ' · $charCount 字符' : ''}',
-        ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: InteractiveViewer(
-            maxScale: 8,
-            child: Image.memory(bytes, fit: BoxFit.contain),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: Text(
+            '坐标校验 · 第 ${pageIndex + 1} 页'
+            '${charCount >= 0 ? ' · $charCount 字符' : ''}',
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('关闭'),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final e in modes.entries)
+                      ChoiceChip(
+                        label: Text(e.value),
+                        selected: mode == e.key,
+                        onSelected: (v) {
+                          if (v) setLocal(() => mode = e.key);
+                        },
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: FutureBuilder<Uint8List?>(
+                    // key 随 mode 变化, 保证切换时重新取图
+                    key: ValueKey(mode),
+                    future: render(mode),
+                    builder: (ctx, snap) {
+                      if (snap.connectionState != ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.all(32),
+                          child: CircularProgressIndicator(),
+                        );
+                      }
+                      final bytes = snap.data;
+                      if (bytes == null) {
+                        return const Padding(
+                          padding: EdgeInsets.all(32),
+                          child: Text('当前页无法生成校验图'),
+                        );
+                      }
+                      final img = InteractiveViewer(
+                        maxScale: 12,
+                        child: Image.memory(bytes, fit: BoxFit.contain),
+                      );
+                      return aspect > 0
+                          ? AspectRatio(aspectRatio: aspect, child: img)
+                          : img;
+                    },
+                  ),
+                ),
+              ],
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -66,12 +66,15 @@ class MainActivity : FlutterActivity() {
                         val path = call.argument<String>("path")
                         val pageIndex = call.argument<Int>("pageIndex") ?: 0
                         val scale = call.argument<Double>("scale") ?: 2.0
+                        // 竖直范围方案: h / font / em, 默认 font
+                        val mode = call.argument<String>("mode") ?: "font"
                         if (path.isNullOrEmpty()) {
                             result.error("bad_args", "path is required", null)
                             return@setMethodCallHandler
                         }
                         try {
-                            val png = debugAnnotatePage(path, pageIndex, scale.toFloat())
+                            val png =
+                                debugAnnotatePage(path, pageIndex, scale.toFloat(), mode)
                             if (png == null) {
                                 result.error("no_page", "page index out of range", null)
                             } else {
@@ -126,12 +129,24 @@ class MainActivity : FlutterActivity() {
      *   "cropX":      Double,  // CropBox 左下角 x(MediaBox 坐标系)
      *   "cropY":      Double,  // CropBox 左下角 y
      *   "rotation":   Int,     // 页面旋转角(0/90/180/270)
-     *   "chars":      [{"c":String,"x":Double,"y":Double,"w":Double,"h":Double}, ...]
+     *   "chars": [
+     *     {
+     *       "c": String,   // 字符
+     *       "x": Double,   // 左边界(显示空间)
+     *       "y": Double,   // 基线(top-down)
+     *       "w": Double,   // 前进宽度
+     *       "h": Double,   // getHeightDir(), 仅作对照
+     *       "fs":   Double, // 有效字号
+     *       "asc":  Double, // 字体 ascent(已缩放, 正值)
+     *       "desc": Double, // 字体 descent(已缩放, 负值)
+     *     }, ...
+     *   ]
      * }
      * ```
      *
-     * 坐标未做 CropBox 平移与旋转补偿, 原样上报, 由 Gate 1 实测确定映射公式,
-     * 避免在未验证前把猜测写死在原生侧。
+     * 竖直范围以 `top = y - asc`、`bottom = y - desc` 计算。Gate 1 首轮实测
+     * 已确认 `h`(getHeightDir) 只适配拉丁大写字母, 中文会被截断, 详见
+     * [CharBoxStripper] 的类注释。
      */
     private fun extractTextPositions(path: String, pageIndex: Int): Map<String, Any>? {
         val file = File(path)
@@ -158,6 +173,9 @@ class MainActivity : FlutterActivity() {
                         "y" to b.y.toDouble(),
                         "w" to b.w.toDouble(),
                         "h" to b.h.toDouble(),
+                        "fs" to b.fs.toDouble(),
+                        "asc" to b.asc.toDouble(),
+                        "desc" to b.desc.toDouble(),
                     )
                 )
             }
@@ -177,19 +195,25 @@ class MainActivity : FlutterActivity() {
     /**
      * [G1] 校验用: 把 PDFBox 字符框描到系统渲染图上, 返回带框 PNG。
      *
-     * 目的是一眼看出坐标是否贴合文字, 从而在 Gate 2 之前独立验证坐标正确性,
-     * 不依赖任何 Flutter 侧叠加层。仅供开发校验入口调用, 不参与正式功能。
+     * [mode] 决定竖直范围的取法, 三套方案同图对照:
+     * - `"h"`    红: `top = y - h`, `bottom = y` —— 首轮方案, 仅拉丁大写贴合
+     * - `"font"` 绿: `top = y - asc`, `bottom = y - desc` —— 字体度量(默认)
+     * - `"em"`   品红: 固定 em 框, 上 0.88 * fs / 下 0.12 * fs —— CJK 经验值
+     *
+     * 仅供开发校验入口调用, 不参与正式功能。
      */
-    private fun debugAnnotatePage(path: String, pageIndex: Int, scale: Float): ByteArray? {
+    private fun debugAnnotatePage(
+        path: String,
+        pageIndex: Int,
+        scale: Float,
+        mode: String,
+    ): ByteArray? {
         val file = File(path)
         if (!file.exists()) return null
         val data = extractTextPositions(path, pageIndex) ?: return null
 
         @Suppress("UNCHECKED_CAST")
         val chars = data["chars"] as List<Map<String, Any>>
-        val pageHeight = (data["pageHeight"] as Double).toFloat()
-        val cropX = (data["cropX"] as Double).toFloat()
-        val cropY = (data["cropY"] as Double).toFloat()
 
         val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         val renderer = PdfRenderer(fd)
@@ -203,8 +227,10 @@ class MainActivity : FlutterActivity() {
                 bitmap.eraseColor(Color.WHITE)
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
 
-                // PdfRenderer 按 CropBox 出图, page.width/height 单位即 PDF 点,
-                // 故位图像素 = (PDF 点 - CropBox 原点) * 像素缩放比。
+                // PdfRenderer 与 PDFBox 都以 CropBox 左上角为原点出图(PDFBox 的
+                // LegacyPDFStreamEngine 已在内部完成 CropBox 平移), 故此处不再
+                // 二次减去 cropX/cropY —— 首轮实测 crop=(0,0) 掩盖了该问题,
+                // 待非零 CropBox 的 PDF 复验。
                 val sx = width.toFloat() / page.width
                 val sy = height.toFloat() / page.height
 
@@ -212,27 +238,55 @@ class MainActivity : FlutterActivity() {
                 val boxPaint = Paint().apply {
                     style = Paint.Style.STROKE
                     strokeWidth = 1f
-                    color = Color.RED
                     isAntiAlias = true
+                    color = when (mode) {
+                        "h" -> Color.RED
+                        "em" -> Color.MAGENTA
+                        else -> Color.rgb(0, 160, 0)
+                    }
                 }
                 for (c in chars) {
-                    val x = (c["x"] as Double).toFloat() - cropX
-                    val y = (c["y"] as Double).toFloat() - cropY
+                    val x = (c["x"] as Double).toFloat()
+                    val y = (c["y"] as Double).toFloat()
                     val w = (c["w"] as Double).toFloat()
-                    val h = (c["h"] as Double).toFloat()
-                    // yDirAdj 为字形下沿, 上沿 = y - h
-                    canvas.drawRect(x * sx, (y - h) * sy, (x + w) * sx, y * sy, boxPaint)
+                    val fs = (c["fs"] as Double).toFloat()
+                    val top: Float
+                    val bottom: Float
+                    when (mode) {
+                        // y 为基线, h 为 getHeightDir(): 拉丁大写高
+                        "h" -> {
+                            top = y - (c["h"] as Double).toFloat()
+                            bottom = y
+                        }
+                        // CJK 经验 em 框, 不依赖字体描述符
+                        "em" -> {
+                            top = y - 0.88f * fs
+                            bottom = y + 0.12f * fs
+                        }
+                        // 字体度量: desc 为负值, 故 bottom = y - desc 在基线之下
+                        else -> {
+                            top = y - (c["asc"] as Double).toFloat()
+                            bottom = y - (c["desc"] as Double).toFloat()
+                        }
+                    }
+                    canvas.drawRect(x * sx, top * sy, (x + w) * sx, bottom * sy, boxPaint)
                 }
 
-                // 左上角打印页面几何元信息, 便于一次实测钉死映射公式
+                // 左上角打印页面几何 + 首个字符的原始度量, 便于按数字反推
                 val textPaint = Paint().apply {
                     color = Color.BLUE
-                    textSize = 11f * scale
+                    textSize = 10f * scale
                     isAntiAlias = true
                 }
-                val info = "chars=${chars.size} render=${page.width}x${page.height} " +
-                    "crop=($cropX,$cropY) h=$pageHeight rot=${data["rotation"]}"
-                canvas.drawText(info, 4f * scale, 14f * scale, textPaint)
+                val head = "mode=$mode chars=${chars.size} render=${page.width}x${page.height} " +
+                    "crop=(${data["cropX"]},${data["cropY"]}) rot=${data["rotation"]}"
+                canvas.drawText(head, 4f * scale, 12f * scale, textPaint)
+                val f = chars.firstOrNull()
+                if (f != null) {
+                    val detail = "c='${f["c"]}' y=${fmt(f["y"])} h=${fmt(f["h"])} " +
+                        "fs=${fmt(f["fs"])} asc=${fmt(f["asc"])} desc=${fmt(f["desc"])}"
+                    canvas.drawText(detail, 4f * scale, 24f * scale, textPaint)
+                }
 
                 val out = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
@@ -246,4 +300,8 @@ class MainActivity : FlutterActivity() {
             fd.close()
         }
     }
+
+    /** [G1] 校验图上的数值保留两位小数, 避免 Double 默认输出过长 */
+    private fun fmt(v: Any?): String =
+        if (v is Double) String.format("%.2f", v) else "$v"
 }
