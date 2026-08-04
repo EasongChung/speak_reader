@@ -1308,13 +1308,13 @@ class _ReaderPageState extends State<ReaderPage> {
     }
     if (!mounted) return;
 
-    // 三套竖直范围方案: 字体度量(默认) / 固定 em 框 / getHeightDir 对照
+    // 三套竖直范围方案; em 框为 Gate 1 实测定论, 其余保留供换文档复验对照
     const modes = <String, String>{
-      'font': '字体度量',
       'em': 'em 框',
+      'font': '字体度量',
       'h': 'heightDir',
     };
-    var mode = 'font';
+    var mode = 'em';
 
     Future<Uint8List?> render(String m) async {
       try {

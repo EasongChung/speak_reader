@@ -66,8 +66,8 @@ class MainActivity : FlutterActivity() {
                         val path = call.argument<String>("path")
                         val pageIndex = call.argument<Int>("pageIndex") ?: 0
                         val scale = call.argument<Double>("scale") ?: 2.0
-                        // 竖直范围方案: h / font / em, 默认 font
-                        val mode = call.argument<String>("mode") ?: "font"
+                        // 竖直范围方案: em(Gate 1 定论) / font / h(对照)
+                        val mode = call.argument<String>("mode") ?: "em"
                         if (path.isNullOrEmpty()) {
                             result.error("bad_args", "path is required", null)
                             return@setMethodCallHandler
@@ -196,11 +196,11 @@ class MainActivity : FlutterActivity() {
      * [G1] 校验用: 把 PDFBox 字符框描到系统渲染图上, 返回带框 PNG。
      *
      * [mode] 决定竖直范围的取法, 三套方案同图对照:
-     * - `"h"`    红: `top = y - h`, `bottom = y` —— 首轮方案, 仅拉丁大写贴合
-     * - `"font"` 绿: `top = y - asc`, `bottom = y - desc` —— 字体度量(默认)
-     * - `"em"`   品红: 固定 em 框, 上 0.88 * fs / 下 0.12 * fs —— CJK 经验值
+     * - `"em"`   品红: 固定 em 框, 上 0.88 / 下 0.12 —— **Gate 1 定论, 默认**
+     * - `"font"` 绿: `top = y - asc`, `bottom = y - desc` —— 字体度量, 随字体跳变
+     * - `"h"`    红: `top = y - h`, `bottom = y` —— 首轮方案, 实测仅 0.5 em
      *
-     * 仅供开发校验入口调用, 不参与正式功能。
+     * 保留三套是为了换文档复验时仍能横向对照, 仅供开发校验入口调用。
      */
     private fun debugAnnotatePage(
         path: String,
@@ -258,10 +258,10 @@ class MainActivity : FlutterActivity() {
                             top = y - (c["h"] as Double).toFloat()
                             bottom = y
                         }
-                        // CJK 经验 em 框, 不依赖字体描述符
+                        // CJK/拉丁通用 em 框(Gate 1 定论), 比例见 CharBox
                         "em" -> {
-                            top = y - 0.88f * fs
-                            bottom = y + 0.12f * fs
+                            top = y - CharBox.ASCENT_EM * fs
+                            bottom = y + CharBox.DESCENT_EM * fs
                         }
                         // 字体度量: desc 为负值, 故 bottom = y - desc 在基线之下
                         else -> {

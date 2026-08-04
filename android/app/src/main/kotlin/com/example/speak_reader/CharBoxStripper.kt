@@ -10,23 +10,32 @@ import kotlin.math.abs
  * 坐标系为 PDFBox「方向校正后的显示空间」: 原点在页面 CropBox 左上角,
  * x 向右为正、y 向下为正, 单位是 PDF 点(1/72 英寸)。
  *
- * ## Gate 1 第一轮实测结论(960x540 页面, crop=(0,0), rot=0, 623 字符)
+ * ## Gate 1 实测定论(960x540 页面, crop=(0,0), rot=0, 623 字符, 已通过)
  *
- * - [x] / [w] 完全正确, 中英文均严丝合缝;
- * - [y] 是**基线**(baseline)在 top-down 坐标下的位置, 不是字形下沿;
- * - [h] 取自 `TextPosition.getHeightDir()`, PDFBox 内部按「字体 bbox 高的一半,
- *   或 capHeight 取小者」计算, 实测**只适用于拉丁大写字母**(MANTIS 完美贴合),
- *   中文字身高约 1.0 em(基线上 0.88 / 基线下 0.12)会被上下各截掉一截。
+ * 样例首字符 `案`: `y=40.15 h=11.01 fs=21.95 asc=18.86 desc=-3.16`
  *
- * 因此正式的竖直范围不再使用 [h], 改由字体度量 [asc] / [desc] 推导:
- * `top = y - asc`, `bottom = y - desc`([desc] 为负值)。
+ * | 量 | 折算 | 结论 |
+ * |---|---|---|
+ * | [x] / [w] | — | 直接可用, 中英文均严丝合缝 |
+ * | [y] | — | **基线**(top-down), 不是字形下沿 |
+ * | [h] | 11.01/21.95 = 0.50 em | `getHeightDir()` 恰为 em 的一半, 中文截掉一半 |
+ * | [asc]/[desc] | 0.859 / -0.144 em | 该字体声明值, 合计 1.003 em |
+ *
+ * 竖直范围最终采用**固定 em 框**([topEm] / [bottomEm]): 与字体度量方案在
+ * 本样本仅差 0.003 em, 但实测整页对照 em 框明显更齐平——原因是页面混排的
+ * 拉丁与粗体字体 `asc`/`desc` 声明值偏大且彼此不一致(`hhea` 与 `OS/2`
+ * 两套度量常年不同), 导致字体度量方案框高随字体跳变。恒定 1.0 em 对
+ * Gate 3 按竖直区间分行归组更稳。
+ *
+ * [asc] / [desc] 予以保留: 供 Gate 3 遇到异常字体时回退比对, 并作为
+ * 本结论的实测留档。
  */
 data class CharBox(
     val ch: String,
     val x: Float,
     val y: Float,
     val w: Float,
-    /** `getHeightDir()`, 仅保留作对照(方案 A), 不用于正式排版 */
+    /** `getHeightDir()`, 实测为 0.5 em, 仅保留作对照, 不用于排版 */
     val h: Float,
     /** 有效字号(显示点), 取自文本渲染矩阵的竖直缩放 */
     val fs: Float,
@@ -34,7 +43,21 @@ data class CharBox(
     val asc: Float,
     /** 字体 descent, 已按 [fs] 缩放为显示点(负值) */
     val desc: Float,
-)
+) {
+    /** 字形上沿: 基线上方 0.88 em(Gate 1 实测定论) */
+    val topEm: Float get() = y - ASCENT_EM * fs
+
+    /** 字形下沿: 基线下方 0.12 em(Gate 1 实测定论) */
+    val bottomEm: Float get() = y + DESCENT_EM * fs
+
+    companion object {
+        /** em 框上沿比例, 覆盖 CJK 字身与拉丁大写高 */
+        const val ASCENT_EM = 0.88f
+
+        /** em 框下沿比例, 覆盖拉丁小写降部与 CJK 字身下缘 */
+        const val DESCENT_EM = 0.12f
+    }
+}
 
 /**
  * [G1] 收集字符级坐标的 [PDFTextStripper] 子类。
