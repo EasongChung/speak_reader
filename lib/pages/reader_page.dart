@@ -782,10 +782,15 @@ class _ReaderPageState extends State<ReaderPage> {
                     child: const Icon(Icons.chevron_left),
                   ),
                   const SizedBox(width: 12),
-                  FloatingActionButton.extended(
-                    heroTag: 'pdf_toc',
-                    label: Text('${_pdfCurrentPage + 1} / $_pdfPageCount'),
-                    onPressed: _showPdfToc,
+                  // [G1] 长按页码 → 字符坐标校验对话框(开发校验入口,
+                  // 不改变原有单击打开目录的行为)
+                  GestureDetector(
+                    onLongPress: _showCharBoxDebug,
+                    child: FloatingActionButton.extended(
+                      heroTag: 'pdf_toc',
+                      label: Text('${_pdfCurrentPage + 1} / $_pdfPageCount'),
+                      onPressed: _showPdfToc,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   FloatingActionButton.small(
@@ -1269,6 +1274,69 @@ class _ReaderPageState extends State<ReaderPage> {
       debugPrint('[v2.6.3] PDF 页面渲染失败: $e');
       return null;
     }
+  }
+
+  /// [G1] 字符坐标校验入口(长按原文模式页码按钮触发)。
+  ///
+  /// 让原生侧用 PDFBox 取当前页字符坐标, 直接描在系统渲染图上返回 PNG,
+  /// 用于肉眼确认坐标映射公式是否正确(是否需要 CropBox 平移 / 旋转补偿、
+  /// `yDirAdj` 是否为字形下沿)。仅开发校验用, 不参与正式朗读流程。
+  Future<void> _showCharBoxDebug() async {
+    final path = _doc.originalFilePath;
+    if (path == null || path.isEmpty || !_doc.isPdfOriginal) {
+      _toast('仅电子版 PDF 支持坐标校验');
+      return;
+    }
+    final pageIndex = _pdfCurrentPage;
+    Uint8List? png;
+    int charCount = -1;
+    String? error;
+    try {
+      // 先取元信息(字符数)便于在标题上直接看出文本层是否存在
+      final meta = await _pdfRenderChannel
+          .invokeMapMethod<String, Object?>('extractTextPositions', {
+        'path': path,
+        'pageIndex': pageIndex,
+      });
+      final chars = meta?['chars'];
+      if (chars is List) charCount = chars.length;
+      png = await _pdfRenderChannel.invokeMethod<Uint8List>(
+        'debugAnnotatePage',
+        {'path': path, 'pageIndex': pageIndex, 'scale': 2.0},
+      );
+    } catch (e) {
+      error = '$e';
+      debugPrint('[G1] 坐标校验失败: $e');
+    }
+    if (!mounted) return;
+    if (png == null) {
+      _toast(error == null ? '当前页无法生成校验图' : '坐标校验失败: $error');
+      return;
+    }
+    final bytes = png;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          '坐标校验 · 第 ${pageIndex + 1} 页'
+          '${charCount >= 0 ? ' · $charCount 字符' : ''}',
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: InteractiveViewer(
+            maxScale: 8,
+            child: Image.memory(bytes, fit: BoxFit.contain),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// [v2.6.2] 收集待 OCR 的图片路径: 图片原文直接取原图; PDF 用系统

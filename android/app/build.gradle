@@ -87,3 +87,11 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // [G1] PDFBox 字符坐标提取(CharBoxStripper / MainActivity.extractTextPositions)。
+    // 该库已由 flutter_pdf_text 0.9.0 以 implementation 引入 APK, 此处仅为让 app
+    // 模块获得编译期可见性; 版本与其严格一致, 避免 Gradle 版本仲裁引入第二份。
+    // APK 体积增长为 0。
+    implementation 'com.tom-roush:pdfbox-android:2.0.27.0'
+}
