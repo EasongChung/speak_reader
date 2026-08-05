@@ -161,5 +161,25 @@ void main() {
     test('空段落列表返回 null', () {
       expect(hitParagraph(const [], Offset.zero), isNull);
     });
+
+    test('[G2.5.1] 段落吸附阈值基于行高(1.5em), 远距离不误吸附', () {
+      // 单行 fs=10 → 行高 12, 阈值 1.5×12=18
+      final paragraphs = buildParagraphs(line('短段', y: 20));
+      // 段在 11.2~21.2, 点在 y=50 → 距离 28.8 > 18 → null
+      expect(hitParagraph(paragraphs, const Offset(10, 50)), isNull);
+    });
+
+    test('[G2.5.1] 多行段落的阈值基于行高中位数, 不是整段高度', () {
+      // 3 行, 每行高 12
+      final paragraphs = buildParagraphs(<Map<Object?, Object?>>[
+        ...line('第一行', y: 20),
+        ...line('第二行', y: 40),
+        ...line('第三行', y: 60),
+      ]);
+      // 行高中位数 12, 阈值 1.5×12=18
+      // 段在 11.2~69.2, 点在 y=100 → 距离 30.8 > 18 → null
+      // (若误用整段高度 ≈58, 阈值会变成 1.5×58=87, 误命中)
+      expect(hitParagraph(paragraphs, const Offset(10, 100)), isNull);
+    });
   });
 }

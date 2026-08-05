@@ -176,20 +176,30 @@ List<ParagraphBox> buildParagraphs(
 SentenceBox? hitSentence(List<SentenceBox> sentences, Offset point,
     {double snapEm = 4}) {
   if (sentences.isEmpty) return null;
-  final est = sentences
-      .map((s) => s.union.height)
-      .firstWhere((h) => h > 0, orElse: () => 12);
+  // 吸附阈值基于真实行高，不是整句框高度（避免跨行长句误扩大吸附范围）
+  final lineHeights = sentences
+      .expand((s) => s.rects.map((r) => r.height))
+      .where((h) => h > 0)
+      .toList();
+  final est = lineHeights.isNotEmpty
+      ? (lineHeights..sort())[lineHeights.length ~/ 2]
+      : 12.0;
   return _hit<SentenceBox>(
       sentences, (s) => s.union, point, snapEm * math.max(est, 1));
 }
 
-/// 点所在的段落；未包含则吸附最近段。
+/// 点所在的段落；未包含则吸附最近段（仅容忍段内行距，避免空白误选）。
 ParagraphBox? hitParagraph(List<ParagraphBox> paragraphs, Offset point,
-    {double snapEm = 4}) {
+    {double snapEm = 1.5}) {
   if (paragraphs.isEmpty) return null;
-  final est = paragraphs
-      .map((p) => p.union.height)
-      .firstWhere((h) => h > 0, orElse: () => 12);
+  // 吸附阈值基于真实行高，不是整段框高度
+  final lineHeights = paragraphs
+      .expand((p) => p.rects.map((r) => r.height))
+      .where((h) => h > 0)
+      .toList();
+  final est = lineHeights.isNotEmpty
+      ? (lineHeights..sort())[lineHeights.length ~/ 2]
+      : 12.0;
   return _hit<ParagraphBox>(
       paragraphs, (p) => p.union, point, snapEm * math.max(est, 1));
 }

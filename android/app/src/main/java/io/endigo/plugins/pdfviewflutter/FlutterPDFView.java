@@ -287,17 +287,29 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
      * <p>但上游 {@code drawWithListener} 在竖向滚动时把次轴(X)偏移写死为 0, 与真正绘页的
      * {@code drawPart} 所用的居中偏移不一致——各页等宽时差值为 0 故未暴露, 页宽不一时框会
      * 整体水平错位。此处用 {@link PdfViewGeometryBridge#getSecondaryPageOffset} 补偿。
+     *
+     * <p>[G2.5.1] ⚠️ 该方法接收的 {@code highlights} 单位为 **PDF 点**, 故缩放分母必须是
+     * CropBox 尺寸(也是 PDF 点), **不是** {@code size}(适配像素)。否则绘制比例与 tap
+     * 归一化比例不同源, 二者会漂移(实测 v2.5.11: tap 按 PDF 点命中准确, 但框被额外除以
+     * 适配比例, 整体缩到左上, 黄框与 toast 内容错位约一行)。
      */
     private void drawHighlights(Canvas canvas, float pageWidth, float pageHeight, int displayedPage) {
         if (highlightPage != displayedPage || highlights.isEmpty()) {
             return;
         }
+        // [G2.5.1] 分母改为 CropBox 尺寸(PDF 点), 与 dispatchTap 的 scale 同源。
+        // pointSizes 尚未下发时退回 size(适配像素), 即归一化前的旧行为, 不崩溃。
         SizeF size = PdfViewGeometryBridge.getPageSize(pdfView, displayedPage);
         if (size.getWidth() <= 0f || size.getHeight() <= 0f) {
             return;
         }
-        float sx = pageWidth / size.getWidth();
-        float sy = pageHeight / size.getHeight();
+        SizeF points = pointSizes.get(displayedPage);
+        float baseW = points != null && points.getWidth() > 0f
+                ? points.getWidth() : size.getWidth();
+        float baseH = points != null && points.getHeight() > 0f
+                ? points.getHeight() : size.getHeight();
+        float sx = pageWidth / baseW;
+        float sy = pageHeight / baseH;
 
         // 修正上游次轴偏移: 竖向滚动补 X, 横向滚动补 Y
         float secondary = PdfViewGeometryBridge.getSecondaryPageOffset(pdfView, displayedPage);
