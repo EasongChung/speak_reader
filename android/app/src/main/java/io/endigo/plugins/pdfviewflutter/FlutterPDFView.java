@@ -66,6 +66,10 @@ import com.shockwave.pdfium.util.SizeF;
  *   <li>接上 {@code .onDraw()}: 绘制高亮框, 并经 {@link PdfViewGeometryBridge}
  *       修正上游次轴偏移写死为 0 的缺陷;</li>
  *   <li>新增 {@code setHighlights} / {@code clearHighlights} 两个 MethodChannel 方法。</li>
+ *   <li>[G2.5] 新增 {@code setPageSize} 方法, 并在 {@code dispatchTap} 中按其下发的
+ *       CropBox 尺寸把 tap 坐标由「FitPolicy 适配后像素」归一为 PDF 点(修复
+ *       G2 真机实测的比例性偏移);</li>
+ *   <li>[G2.5] {@code onPageChanged} 中清空旧页高亮, 修复翻回旧页时残留框复现。</li>
  * </ol>
  */
 public class FlutterPDFView implements PlatformView, MethodCallHandler {
@@ -78,6 +82,16 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
 
     /** [G2] 高亮框所属页; -1 表示无 */
     private int highlightPage = -1;
+
+    /**
+     * [G2.5] 各页 CropBox 尺寸(PDF 点), 由 Flutter 侧 {@code setPageSize} 下发。
+     *
+     * <p>用于把 tap 结果从「FitPolicy 适配后像素」归一到 PDF 点(详见
+     * {@link #dispatchTap})。原生侧无法自行取得: PDFBox 在 Flutter 侧的
+     * {@code extractTextPositions} 通道里, 而 {@code PdfFile#originalPageSizes}
+     * 是上游私有字段, 不属于 {@link PdfViewGeometryBridge} 可只读转发的范围。
+     */
+    private final android.util.SparseArray<SizeF> pointSizes = new android.util.SparseArray<>();
 
     /** [G2] 高亮填充画笔, 半透明避免遮挡原文 */
     private final Paint highlightPaint = new Paint();
@@ -154,6 +168,12 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
                     .onPageChange(new OnPageChangeListener() {
                         @Override
                         public void onPageChanged(int page, int total) {
+                            // [G2.5] 翻页即弃掉旧页高亮: highlights 此前只按 highlightPage
+                            // 过滤而从不清空, 导致翻回旧页时上一次的框会重新出现。
+                            if (highlightPage != page && !highlights.isEmpty()) {
+                                highlights.clear();
+                                highlightPage = -1;
+                            }
                             Map<String, Object> args = new HashMap<>();
                             args.put("page", page);
                             args.put("total", total);
@@ -192,8 +212,21 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
      *
      * <p>换算配方照抄上游 {@code DragPinchManager#onSingleTapConfirmed}: 先减去
      * 视图滚动偏移得到文档坐标, 再定位页码, 最后减去该页主/次轴偏移得到页内坐标,
-     * 除以 zoom 还原为未缩放的页面坐标。与 {@link #drawHighlights} 共用同一套换算,
-     * 保证「点中的位置」与「画框的位置」严格同源。
+     * 除以 zoom 还原为未缩放的坐标。
+     *
+     * <p>[G2.5] ⚠️ 到此为止得到的**不是** PDF 点, 而是 <b>FitPolicy 适配后的像素</b>:
+     * 上游 {@code PdfFile#getPageSize} 返回的是 {@code pageSizes}(源码注释
+     * {@code Scaled page sizes}), 即 {@code PageSizeCalculator} 按视图宽度适配过的
+     * 尺寸。绘制侧 {@code drawHighlights} 用 {@code pageWidth / size.getWidth()}
+     * 做缩放, 恰好把该比例约掉, 所以 G1/G2 的**画框是对的**; 而 tap 侧此前直接上报
+     * 这个像素值, 与 PDFBox 的 PDF 点差了一个适配比例 —— 表现为**偏移量正比于坐标**
+     * (左上角原点附近误差≈0, 越往右下越大), 与 zoom / pan 无关(故放大平移后点同一
+     * 位置仍得同一字符)。此即 G2 真机验证「仅左上角几个字能命中」的根因。
+     *
+     * <p>修正: 按 {@code PDF 点 ÷ 适配像素} 归一化。该比例由 Flutter 侧经
+     * {@code setPageSize} 下发的 CropBox 尺寸与 {@code getPageSize} 相除得到,
+     * 与绘制侧所用比例互为倒数, **两侧仍严格同源**。未下发时(尺寸未知)按 1.0
+     * 处理, 退化为修正前行为, 不会崩溃。
      */
     private void dispatchTap(MotionEvent e) {
         if (!PdfViewGeometryBridge.isReady(pdfView)) {
@@ -214,22 +247,34 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
         if (zoom <= 0f) {
             return;
         }
-        // 页内坐标(未缩放): 与 PDFBox 的 CropBox 左上原点坐标系一致
-        float x = (mappedX - pageLeft) / zoom;
-        float y = (mappedY - pageTop) / zoom;
+        // 页内坐标, 单位为「FitPolicy 适配后像素」(尚未归一到 PDF 点)
+        float fittedX = (mappedX - pageLeft) / zoom;
+        float fittedY = (mappedY - pageTop) / zoom;
 
-        SizeF size = PdfViewGeometryBridge.getPageSize(pdfView, page);
-        // 落在页间空白处则不上报, 避免 Flutter 侧收到越界坐标
-        if (x < 0f || y < 0f || x > size.getWidth() || y > size.getHeight()) {
+        SizeF fitted = PdfViewGeometryBridge.getPageSize(pdfView, page);
+        if (fitted.getWidth() <= 0f || fitted.getHeight() <= 0f) {
             return;
         }
+        // 落在页间空白处则不上报(在适配像素域判定, 与 fitted 同单位)
+        if (fittedX < 0f || fittedY < 0f
+                || fittedX > fitted.getWidth() || fittedY > fitted.getHeight()) {
+            return;
+        }
+
+        // [G2.5] 归一到 PDF 点: 比例 = CropBox 尺寸 ÷ 适配后尺寸
+        float pageW = pointSizes.get(page) == null ? 0f : pointSizes.get(page).getWidth();
+        float pageH = pointSizes.get(page) == null ? 0f : pointSizes.get(page).getHeight();
+        float scaleX = pageW > 0f ? pageW / fitted.getWidth() : 1f;
+        float scaleY = pageH > 0f ? pageH / fitted.getHeight() : 1f;
+        float x = fittedX * scaleX;
+        float y = fittedY * scaleY;
 
         Map<String, Object> args = new HashMap<>();
         args.put("page", page);
         args.put("x", (double) x);
         args.put("y", (double) y);
-        args.put("pageWidth", (double) size.getWidth());
-        args.put("pageHeight", (double) size.getHeight());
+        args.put("pageWidth", (double) (pageW > 0f ? pageW : fitted.getWidth()));
+        args.put("pageHeight", (double) (pageH > 0f ? pageH : fitted.getHeight()));
         methodChannel.invokeMethod("onTap", args);
     }
 
@@ -294,6 +339,10 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
             case "clearHighlights":
                 clearHighlights(result);
                 break;
+            // [G2.5] 下发某页 CropBox 尺寸(PDF 点), 供 tap 坐标归一化
+            case "setPageSize":
+                setPageSize(methodCall, result);
+                break;
             default:
                 result.notImplemented();
                 break;
@@ -346,6 +395,27 @@ public class FlutterPDFView implements PlatformView, MethodCallHandler {
         highlights.clear();
         highlightPage = -1;
         pdfView.invalidate();
+        result.success(true);
+    }
+
+    /**
+     * [G2.5] 记录某页 CropBox 尺寸(PDF 点), 供 {@link #dispatchTap} 归一化坐标。
+     *
+     * <p>入参 {@code page} / {@code width} / {@code height}; 尺寸非正则视为撤销该页记录。
+     */
+    private void setPageSize(MethodCall call, Result result) {
+        Integer page = call.argument("page");
+        Double width = call.argument("width");
+        Double height = call.argument("height");
+        if (page == null) {
+            result.success(false);
+            return;
+        }
+        if (width == null || height == null || width <= 0 || height <= 0) {
+            pointSizes.remove(page);
+        } else {
+            pointSizes.put(page, new SizeF(width.floatValue(), height.floatValue()));
+        }
         result.success(true);
     }
 

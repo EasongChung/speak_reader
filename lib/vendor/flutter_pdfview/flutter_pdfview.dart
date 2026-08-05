@@ -27,7 +27,9 @@
 /// 1. ViewType 改为 `speak_reader/pdfview`, 与上游注册名区隔;
 /// 2. 新增 [PDFView.onTap] 回调, 回传页面坐标(PDF 点), 供点击朗读定位字符;
 /// 3. 新增 [PDFViewController.setHighlights] / [PDFViewController.clearHighlights];
-/// 4. 移除 iOS 分支: 本项目仅支持 Android(arm64-v8a), 原生侧未 vendoring iOS 实现。
+/// 4. 移除 iOS 分支: 本项目仅支持 Android(arm64-v8a), 原生侧未 vendoring iOS 实现;
+/// 5. [G2.5] 新增 [PDFViewController.setPageSize]: 下发 CropBox 尺寸供原生侧把 tap
+///    坐标由「FitPolicy 适配后像素」归一为 PDF 点(修复 G2 实测的比例性偏移)。
 library;
 
 import 'dart:async';
@@ -463,6 +465,22 @@ class PDFViewController {
   /// [G2] 清除全部高亮框
   Future<void> clearHighlights() async {
     await _channel.invokeMethod<bool>('clearHighlights');
+  }
+
+  /// [G2.5] 下发某页 CropBox 尺寸(PDF 点), 供原生侧归一化 tap 坐标。
+  ///
+  /// 原生 `PdfFile.getPageSize` 返回的是 **FitPolicy 适配后的像素**(上游源码注释
+  /// `Scaled page sizes`), 与 PDFBox 的 PDF 点差一个适配比例。绘制侧因两处比例
+  /// 相除而自然抵消, tap 侧则必须显式归一, 否则命中点会出现**正比于坐标的偏移**。
+  ///
+  /// 尺寸取自 `extractTextPositions` 返回的 `pageWidth` / `pageHeight`。
+  /// 未调用时原生侧按 1.0 处理(退化为归一化前行为)。
+  Future<void> setPageSize(int page, double width, double height) async {
+    await _channel.invokeMethod<bool>('setPageSize', <String, dynamic>{
+      'page': page,
+      'width': width,
+      'height': height,
+    });
   }
 
   Future<void> _updateWidget(PDFView widget) async {

@@ -11,6 +11,7 @@ import '../services/audio_export_service.dart'
 import '../services/tts_service.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
+import '../services/text_position_service.dart';
 import '../services/translation_service.dart';
 import '../services/vision_ocr_service.dart';
 // [G2] 已 vendoring 到本仓库, 不再走 pub 依赖: 点击朗读需要上游未暴露的
@@ -745,11 +746,16 @@ class _ReaderPageState extends State<ReaderPage> {
               if (!mounted) return;
               // [v2.5.2] 原文翻页联动「查看文本」弹窗与文本阅读内容
               _syncPage(page ?? _pdfCurrentPage);
+              // [G2.5] 各页 CropBox 可不同, 翻页后重新下发当前页尺寸。
+              // 不并入 _syncPage: 后者对单页文档会提前 return。
+              _syncPageSize(page ?? _pdfCurrentPage);
             },
             onViewCreated: (vc) {
               _pdfController = vc;
+              // [G2.5] 视图就绪即下发当前页尺寸, 使首次点击的坐标即已归一
+              _syncPageSize(_pdfCurrentPage);
             },
-            // [G2] 点击原文 → 命中字符 → 画高亮框(校验用, 暂不接 TTS)
+            // [G3] 点击原文 → 命中句子 → 高亮 + 朗读(句未中则兜底高亮段落)
             onTap: _onPdfTap,
           ),
         ),
@@ -1264,6 +1270,32 @@ class _ReaderPageState extends State<ReaderPage> {
   static const _pdfRenderChannel =
       MethodChannel('com.example.speak_reader/pdf_render');
 
+  /// [G2.5] 预先把指定页的 CropBox 尺寸下发给原生侧。
+  ///
+  /// 原生 tap 换算需要它才能把「FitPolicy 适配后像素」归一为 PDF 点。在渲染完成
+  /// 与翻页时各下发一次, 避免用户首次点击落在未归一的坐标上。
+  Future<void> _syncPageSize(int pageIndex) async {
+    final path = _doc.originalFilePath;
+    if (path == null || path.isEmpty || !_doc.isPdfOriginal) return;
+    final controller = _pdfController;
+    if (controller == null) return;
+    try {
+      final data = await _pdfRenderChannel
+          .invokeMapMethod<String, Object?>('extractTextPositions', {
+        'path': path,
+        'pageIndex': pageIndex,
+      });
+      final pw = (data?['pageWidth'] as num?)?.toDouble() ?? 0;
+      final ph = (data?['pageHeight'] as num?)?.toDouble() ?? 0;
+      if (pw > 0 && ph > 0) {
+        await controller.setPageSize(pageIndex, pw, ph);
+      }
+    } catch (e) {
+      // 取不到尺寸时原生侧按 1.0 处理, 命中会偏移但不崩溃
+      debugPrint('[G2.5] 页面尺寸下发失败: $e');
+    }
+  }
+
   /// [v2.6.3] 渲染 PDF 指定页为 PNG 字节流(白底, 2x 缩放), 失败返回 null。
   Future<Uint8List?> _renderPdfPage(int pageIndex) async {
     final path = _doc.originalFilePath;
@@ -1280,14 +1312,15 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  /// [G2] 点击原文 → 命中字符 → 画高亮框(Gate 2 校验用, 暂不接 TTS)。
+  /// [G3] 点击原文 → 命中句子 → 高亮并朗读; 句子未中则兜底高亮所在段落。
   ///
-  /// [details] 的坐标与 PDFBox `extractTextPositions` 同一坐标系(页面点,
-  /// 原点在 CropBox 左上角), 故可直接与字符框比对, 无需任何换算。
-  /// 竖直范围沿用 Gate 1 实测定论的固定 em 框(上 0.88 / 下 0.12)。
+  /// [details] 的坐标与 PDFBox `extractTextPositions` 同一坐标系(页面点, 原点在
+  /// CropBox 左上角) —— 该结论自 [G2.5] 起才真正成立: 原生 `PdfFile.getPageSize`
+  /// 返回的是 FitPolicy 适配后的像素, 需经 `setPageSize` 下发 CropBox 尺寸归一化,
+  /// 否则命中点会出现正比于坐标的偏移(G2 真机实测)。
   ///
-  /// 本关只验证「点中的字 == 画框的字」在缩放/平移/翻页下是否始终成立;
-  /// 命中后接 TTS 朗读是 Gate 3 的范围, 混进来会让失败原因不可归因。
+  /// 命中优先级: 句子 → 段落 → 清除。仅句子命中时朗读(段落粒度过粗, 朗读整段
+  /// 与「点哪读哪」的预期不符, 故只高亮供定位)。
   Future<void> _onPdfTap(PdfTapDetails details) async {
     final path = _doc.originalFilePath;
     if (path == null || path.isEmpty || !_doc.isPdfOriginal) return;
@@ -1297,32 +1330,51 @@ class _ReaderPageState extends State<ReaderPage> {
         'extractTextPositions',
         {'path': path, 'pageIndex': details.page},
       );
-      final chars = (data?['chars'] as List?) ?? const [];
-
-      // 命中判定: x 落在字符前进宽度内, y 落在 em 框内
-      for (final c in chars.cast<Map>()) {
-        final x = (c['x'] as num).toDouble();
-        final y = (c['y'] as num).toDouble();
-        final w = (c['w'] as num).toDouble();
-        final fs = (c['fs'] as num).toDouble();
-        final top = y - 0.88 * fs;
-        final bottom = y + 0.12 * fs;
-        if (details.x >= x &&
-            details.x <= x + w &&
-            details.y >= top &&
-            details.y <= bottom) {
-          await _pdfController?.setHighlights(
-            details.page,
-            [Rect.fromLTRB(x, top, x + w, bottom)],
-          );
-          _toast('命中「${c['c']}」');
-          return;
-        }
+      if (!mounted) return;
+      final rawChars = (data?['chars'] as List?) ?? const [];
+      if (rawChars.isEmpty) {
+        await _pdfController?.clearHighlights();
+        return;
       }
-      // 未命中(点在空白处): 清除上一次的框, 便于观察对齐是否漂移
+      final chars = rawChars.cast<Map<Object?, Object?>>();
+
+      // [G2.5] 把本页 CropBox 尺寸下发给原生侧, 使 tap 坐标归一到 PDF 点。
+      // 正常情况下 _syncPageSize 已在渲染完成/翻页时预先下发, 这里是兜底
+      // (如预下发时通道尚未就绪), 保证至多一次点击用到未归一坐标。
+      final pw = (data?['pageWidth'] as num?)?.toDouble() ?? 0;
+      final ph = (data?['pageHeight'] as num?)?.toDouble() ?? 0;
+      if (pw > 0 && ph > 0) {
+        await _pdfController?.setPageSize(details.page, pw, ph);
+      }
+
+      final point = Offset(details.x, details.y);
+
+      // 1) 句子级命中(含未中时吸附最近句)
+      final sentence = hitSentence(buildSentences(chars), point);
+      if (sentence != null && sentence.text.trim().isNotEmpty) {
+        await _pdfController?.setHighlights(details.page, [sentence.union]);
+        if (!mounted) return;
+        final text = sentence.text.trim();
+        _toast('命中句子：$text');
+        // 对齐文本模式: 交给 TtsService 按既有规则切分后从首句读起
+        _tts.setText(text);
+        await _tts.play();
+        return;
+      }
+
+      // 2) 段落级兜底(仅高亮定位, 不朗读)
+      final paragraph = hitParagraph(buildParagraphs(chars), point);
+      if (paragraph != null && paragraph.text.trim().isNotEmpty) {
+        await _pdfController?.setHighlights(details.page, paragraph.rects);
+        if (!mounted) return;
+        _toast('命中段落：${paragraph.text.trim()}');
+        return;
+      }
+
+      // 3) 都未命中(点在页边空白): 清除上一次的框
       await _pdfController?.clearHighlights();
     } catch (e) {
-      debugPrint('[G2] 点击命中失败: $e');
+      debugPrint('[G3] 点击命中失败: $e');
     }
   }
 
