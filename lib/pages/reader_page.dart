@@ -1352,7 +1352,7 @@ class _ReaderPageState extends State<ReaderPage> {
       // 1) 句子级命中(含未中时吸附最近句)
       final sentence = hitSentence(buildSentences(chars), point);
       if (sentence != null && sentence.text.trim().isNotEmpty) {
-        await _pdfController?.setHighlights(details.page, [sentence.union]);
+        await _pdfController?.setHighlights(details.page, sentence.rects);
         if (!mounted) return;
         final text = sentence.text.trim();
         _toast('命中句子：$text');

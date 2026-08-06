@@ -36,5 +36,19 @@ void main() {
 
       expect(service.tokens, isEmpty);
     });
+
+    test('[#3] multi-line sentence merges into one token', () {
+      final service = TtsService();
+      service.setText('第一行\n第二行。');
+
+      expect(service.tokens, ['第一行\n第二行。']);
+    });
+
+    test('[#3] punctuation terminates even across lines', () {
+      final service = TtsService();
+      service.setText('句子一。\n句子二！');
+
+      expect(service.tokens, ['句子一。', '句子二！']);
+    });
   });
 }

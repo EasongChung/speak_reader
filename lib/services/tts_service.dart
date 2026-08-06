@@ -81,7 +81,7 @@ class TtsService {
 
   List<String> _splitSentences(String text) {
     final normalized = text.replaceAll('\r\n', '\n');
-    final rawParts = normalized.split(RegExp(r'(?<=[。！？!?；;\n])'));
+    final rawParts = normalized.split(RegExp(r'(?<=[。！？!?；;])'));
     final result = <String>[];
     for (final part in rawParts) {
       final sentence = part.trim();

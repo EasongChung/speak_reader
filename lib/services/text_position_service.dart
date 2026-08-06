@@ -7,9 +7,8 @@ import 'dart:ui';
 
 /// 一个句子的几何与文本。
 ///
-/// 分句规则与 `TtsService._splitSentences` 对齐：以 `。！？!?；;` 及换行为
-/// 硬边界。因现有实现把 `\n` 也视作边界，**句子不跨行**，故 [rects] 通常只有
-/// 一个行段矩形；保留列表以兼容未来跨行句。
+/// 分句规则与 `TtsService._splitSentences` 对齐：以 `。！？!?；;` 为硬边界。
+/// **句子可以跨行**（v2.6.x #3 改动），此时 [rects] 含多个矩形（每行一个）。
 class SentenceBox {
   SentenceBox({required this.text, required this.rects});
 
@@ -64,7 +63,8 @@ class _Line {
       .reduce((a, b) => a > b ? a : b);
 }
 
-/// 句子终止标点（与 `TtsService` 的正则 `(?<=[。！？!?；;\n])` 对齐）。
+/// 句子终止标点（与 `TtsService` 的正则 `(?<=[。！？!?；;])` 对齐，
+/// v2.6.x #3 起换行不再是硬边界）。
 const String _sentenceTerms = '。！？!?；;';
 
 double _fs(Map<Object?, Object?> c) =>
@@ -99,29 +99,67 @@ List<_Line> _buildLines(List<Map<Object?, Object?>> chars) {
   }).toList();
 }
 
-/// 字符坐标 → 句子列表（行内按终止标点切句）。
+/// 字符坐标 → 句子列表（按终止标点切句，**句子可跨行**）。
 ///
 /// [chars] 需为 `extractTextPositions` 返回的 `chars`（阅读顺序）。
-/// 说明：现有 `TtsService` 把换行也当硬边界，**句子不跨行**，这里对每行独立
-/// 切句，与朗读语义保持一致。
-List<SentenceBox> buildSentences(List<Map<Object?, Object?>> chars) {
+///
+/// 与 `TtsService._splitSentences` 对齐：换行**不是**边界，句子跨行累积，
+/// [SentenceBox.rects] 每行一个矩形。但**段落间隙仍是硬边界**——行间垂直
+/// 间隙 > [paraGapEm]×行高（出现空行）时强制断句，否则无标点文本（标题、
+/// 列表等）会把整页合成一句。
+///
+/// 跨行拼接时按语种补空格：两侧均为拉丁字符才插入空格，CJK 不插。
+List<SentenceBox> buildSentences(
+  List<Map<Object?, Object?>> chars, {
+  double paraGapEm = 1.8,
+}) {
   if (chars.isEmpty) return const [];
+  final charH = _medianFs(chars) * 1.2;
   final result = <SentenceBox>[];
-  for (final line in _buildLines(chars)) {
-    final sb = StringBuffer();
-    var left = double.infinity;
-    var right = double.negativeInfinity;
 
-    void flush() {
-      if (sb.isNotEmpty && right >= left) {
-        result.add(SentenceBox(
-          text: sb.toString(),
-          rects: [Rect.fromLTRB(left, line.top, right, line.bottom)],
-        ));
-      }
-      sb.clear();
-      left = double.infinity;
-      right = double.negativeInfinity;
+  // 跨行累积状态
+  final sb = StringBuffer();
+  final rects = <Rect>[];
+  var left = double.infinity;
+  var right = double.negativeInfinity;
+  var curTop = 0.0;
+  var curBottom = 0.0;
+  var lastChar = '';
+
+  /// 收束当前行段矩形（句子未必结束）
+  void closeRect() {
+    if (right >= left) {
+      rects.add(Rect.fromLTRB(left, curTop, right, curBottom));
+    }
+    left = double.infinity;
+    right = double.negativeInfinity;
+  }
+
+  /// 结束当前句
+  void flush() {
+    closeRect();
+    if (sb.isNotEmpty && rects.isNotEmpty) {
+      result.add(SentenceBox(text: sb.toString(), rects: List.of(rects)));
+    }
+    sb.clear();
+    rects.clear();
+    lastChar = '';
+  }
+
+  double? prevBottom;
+  for (final line in _buildLines(chars)) {
+    if (prevBottom != null && line.top - prevBottom > paraGapEm * charH) {
+      flush(); // 空行 → 段落边界，硬断句
+    }
+    curTop = line.top;
+    curBottom = line.bottom;
+
+    // 跨行续接：拉丁文在换行处需补空格，CJK 直接相连
+    if (sb.isNotEmpty &&
+        line.chars.isNotEmpty &&
+        !_isCjk(lastChar) &&
+        !_isCjk(line.chars.first['c'].toString())) {
+      sb.write(' ');
     }
 
     for (final c in line.chars) {
@@ -129,11 +167,25 @@ List<SentenceBox> buildSentences(List<Map<Object?, Object?>> chars) {
       left = math.min(left, _x(c));
       right = math.max(right, _x(c) + _w(c));
       sb.write(ch);
+      lastChar = ch;
       if (_sentenceTerms.contains(ch)) flush();
     }
-    flush(); // 行尾亦为边界（对应 TtsService 的 \n）
+    closeRect(); // 行尾收束矩形，但句子继续跨到下一行
+    prevBottom = line.bottom;
   }
+  flush();
   return result;
+}
+
+/// 首字符是否为 CJK（含中日韩统一表意文字、兼容表意文字、中文标点、全角符号）。
+bool _isCjk(String s) {
+  if (s.isEmpty) return false;
+  final cp = s.codeUnitAt(0);
+  return (cp >= 0x3000 && cp <= 0x303F) || // CJK 标点
+      (cp >= 0x3400 && cp <= 0x4DBF) || // 扩展 A
+      (cp >= 0x4E00 && cp <= 0x9FFF) || // 基本区
+      (cp >= 0xF900 && cp <= 0xFAFF) || // 兼容表意
+      (cp >= 0xFF00 && cp <= 0xFFEF); // 全角
 }
 
 /// 字符坐标 → 段落列表（句子定位失败时的兜底）。
@@ -173,6 +225,9 @@ List<ParagraphBox> buildParagraphs(
 /// 点所在的句子；未包含则吸附最近句（容忍点击偏移）。
 ///
 /// 返回 null 表示距所有句子都太远（调用方可回落到段落兜底）。
+///
+/// **按 [SentenceBox.rects] 逐个行段判定**，不能用 `union`：跨行句的 union
+/// 是横跨多行的大矩形，会把行首/行尾的空白区域也算作命中。
 SentenceBox? hitSentence(List<SentenceBox> sentences, Offset point,
     {double snapEm = 4}) {
   if (sentences.isEmpty) return null;
@@ -184,8 +239,8 @@ SentenceBox? hitSentence(List<SentenceBox> sentences, Offset point,
   final est = lineHeights.isNotEmpty
       ? (lineHeights..sort())[lineHeights.length ~/ 2]
       : 12.0;
-  return _hit<SentenceBox>(
-      sentences, (s) => s.union, point, snapEm * math.max(est, 1));
+  return _hitRects<SentenceBox>(
+      sentences, (s) => s.rects, point, snapEm * math.max(est, 1));
 }
 
 /// 点所在的段落；未包含则吸附最近段（仅容忍段内行距，避免空白误选）。
@@ -202,6 +257,24 @@ ParagraphBox? hitParagraph(List<ParagraphBox> paragraphs, Offset point,
       : 12.0;
   return _hit<ParagraphBox>(
       paragraphs, (p) => p.union, point, snapEm * math.max(est, 1));
+}
+
+/// 按行段矩形命中：任一 rect 包含则直接命中，否则取到各 rect 的最短距离。
+T? _hitRects<T>(
+    List<T> items, List<Rect> Function(T) rectsOf, Offset point, double snap) {
+  T? best;
+  var bestD = double.infinity;
+  for (final it in items) {
+    for (final r in rectsOf(it)) {
+      if (r.contains(point)) return it;
+      final d = _distToRect(point, r);
+      if (d < bestD) {
+        bestD = d;
+        best = it;
+      }
+    }
+  }
+  return bestD <= snap ? best : null;
 }
 
 /// 通用命中：包含优先，否则最近且位于 [snap] 阈值内。

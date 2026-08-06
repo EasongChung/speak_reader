@@ -56,18 +56,55 @@ void main() {
       expect(union.bottom, closeTo(21.2, 1e-6));
     });
 
-    test('句子不跨行: 与 TtsService 把 \\n 视作硬边界的规则一致', () {
-      // 无标点的两行, 应切成两句而非合并成一句
+    test('[#3] 句子跨行合并: 无标点的两行合成一句, rects 每行一个', () {
+      // 行距 20 < 1.8×12=21.6, 属同段 → 跨行续接
       final chars = <Map<Object?, Object?>>[
         ...line('上行', y: 20),
         ...line('下行', y: 40),
       ];
       final sentences = buildSentences(chars);
 
-      expect(sentences.map((s) => s.text).toList(), ['上行', '下行']);
+      expect(sentences, hasLength(1));
+      expect(sentences.single.text, '上行下行');
+      expect(sentences.single.rects, hasLength(2));
     });
 
-    test('行尾无标点也成句(对应 TtsService 的换行边界)', () {
+    test('[#3] 跨行句在终止标点处断开, 不吞下一句', () {
+      final chars = <Map<Object?, Object?>>[
+        ...line('上行结束。', y: 20),
+        ...line('下一句', y: 40),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['上行结束。', '下一句']);
+    });
+
+    test('[#3] 段落间隙(空行)仍是硬边界, 无标点也断句', () {
+      // 行距 40 > 21.6 → 视为跨段, 强制断句
+      final chars = <Map<Object?, Object?>>[
+        ...line('第一段', y: 20),
+        ...line('第二段', y: 60),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['第一段', '第二段']);
+    });
+
+    test('[#3] 拉丁文跨行补空格, CJK 不补', () {
+      final latin = <Map<Object?, Object?>>[
+        ...line('abc', y: 20),
+        ...line('def', y: 32),
+      ];
+      expect(buildSentences(latin).single.text, 'abc def');
+
+      final cjk = <Map<Object?, Object?>>[
+        ...line('中文', y: 20),
+        ...line('续行', y: 32),
+      ];
+      expect(buildSentences(cjk).single.text, '中文续行');
+    });
+
+    test('行尾无标点也成句(段落末尾收束)', () {
       final sentences = buildSentences(line('无标点结尾', y: 20));
 
       expect(sentences.single.text, '无标点结尾');

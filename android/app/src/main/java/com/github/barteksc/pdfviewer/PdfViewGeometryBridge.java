@@ -77,7 +77,16 @@ public final class PdfViewGeometryBridge {
         return pdfView.pdfFile.getPageAtOffset(offset, pdfView.getZoom());
     }
 
-    /** 指定页的原始尺寸(未缩放, 单位与 PDF 点一致) */
+    /**
+     * 指定页的适配尺寸(FitPolicy 缩放后的像素, 非 PDF 原始点)。
+     *
+     * <p><strong>注意：</strong>此方法返回的是上游 {@link PdfFile#getPageSize} 的
+     * {@code Scaled page sizes}（FitPolicy 适配后像素），<strong>不是</strong>
+     * PDF 原始点尺寸。真实 PDF 点尺寸位于 {@code PdfFile.originalPageSizes}（私有字段）。
+     *
+     * <p>这是 G2.5.1 缺陷源头：此注释最初错写为"原始尺寸(未缩放, 单位与 PDF 点一致)"，
+     * 导致坐标换算时误将适配像素当作 PDF 点使用，造成「命中对、画框错」。
+     */
     public static SizeF getPageSize(PDFView pdfView, int page) {
         if (!isReady(pdfView)) {
             return new SizeF(0f, 0f);
