@@ -56,27 +56,28 @@ void main() {
       expect(union.bottom, closeTo(21.2, 1e-6));
     });
 
-    test('[#3] 句子跨行合并: 无标点的两行合成一句, rects 每行一个', () {
-      // 行距 20 < 1.8×12=21.6, 属同段 → 跨行续接
+    test('[#3] 句子跨行合并: 自动折行的两行合成一句, rects 每行一个', () {
+      // 上行贴满版心右边界(与最长行等宽)、行末无符号、下行无缩进无符号 → 合并
+      // 行距 20 < 1.8×12=21.6, 属同段
       final chars = <Map<Object?, Object?>>[
-        ...line('上行', y: 20),
-        ...line('下行', y: 40),
+        ...line('上行文字', y: 20),
+        ...line('下行文字', y: 40),
       ];
       final sentences = buildSentences(chars);
 
       expect(sentences, hasLength(1));
-      expect(sentences.single.text, '上行下行');
+      expect(sentences.single.text, '上行文字下行文字');
       expect(sentences.single.rects, hasLength(2));
     });
 
     test('[#3] 跨行句在终止标点处断开, 不吞下一句', () {
       final chars = <Map<Object?, Object?>>[
         ...line('上行结束。', y: 20),
-        ...line('下一句', y: 40),
+        ...line('下一句在此', y: 40),
       ];
       final sentences = buildSentences(chars);
 
-      expect(sentences.map((s) => s.text).toList(), ['上行结束。', '下一句']);
+      expect(sentences.map((s) => s.text).toList(), ['上行结束。', '下一句在此']);
     });
 
     test('[#3] 段落间隙(空行)仍是硬边界, 无标点也断句', () {
@@ -102,6 +103,59 @@ void main() {
         ...line('续行', y: 32),
       ];
       expect(buildSentences(cjk).single.text, '中文续行');
+    });
+
+    test('[#3-fix][判据1] 上行远离右边界(段末短行) → 不与下行合并', () {
+      // 第 1 行仅 2 字(x 到 20), 第 2 行 8 字(x 到 80) → 版心右边界 80
+      // 上行距边界 60 ≫ 2 字符(20) → 判为段落末尾短行, 断句
+      final chars = <Map<Object?, Object?>>[
+        ...line('短行', y: 20),
+        ...line('这是很长的下一行', y: 32),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['短行', '这是很长的下一行']);
+    });
+
+    test('[#3-fix][判据2] 上行行末带逗号(人工换行) → 不合并', () {
+      final chars = <Map<Object?, Object?>>[
+        ...line('前半句内容，', y: 20),
+        ...line('后半句内容。', y: 32),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['前半句内容，', '后半句内容。']);
+    });
+
+    test('[#3-fix][判据3] 下一行有缩进(新段首行) → 不合并', () {
+      // 两行等宽, 但下行左起 20(=2 字符缩进) → 判为新段首行
+      final chars = <Map<Object?, Object?>>[
+        ...line('上一段结尾文字', y: 20),
+        ...line('新段落开头文字', y: 32, startX: 20),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['上一段结尾文字', '新段落开头文字']);
+    });
+
+    test('[#3-fix][判据4] 下一行以项目符号开头 → 不合并', () {
+      final chars = <Map<Object?, Object?>>[
+        ...line('列表引导文字', y: 20),
+        ...line('•列表第一项', y: 32),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['列表引导文字', '•列表第一项']);
+    });
+
+    test('[#3-fix][判据4] 下一行以 1. 序号开头 → 不合并', () {
+      final chars = <Map<Object?, Object?>>[
+        ...line('下面分条说明', y: 20),
+        ...line('1.第一条内容', y: 32),
+      ];
+      final sentences = buildSentences(chars);
+
+      expect(sentences.map((s) => s.text).toList(), ['下面分条说明', '1.第一条内容']);
     });
 
     test('行尾无标点也成句(段落末尾收束)', () {

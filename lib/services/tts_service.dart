@@ -2,6 +2,8 @@ import 'dart:io' show File;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
+import 'line_merge_rules.dart';
+
 /// 朗读状态
 enum TtsState { stopped, playing, paused }
 
@@ -79,15 +81,86 @@ class TtsService {
   // ---------- 常规模式:按句切分(第一版逻辑) ----------
   static const int maxSpeakLength = 120;
 
+  /// 按终止标点切句;换行是否断句由 [canMergeLines] 逐处判定。
+  ///
+  /// v2.6.x #3 之前换行是无条件硬边界,跨行长句被切成多段读;#3 首版改成
+  /// 无条件合并,又导致段落末尾短行粘上下一段、行末带逗号的人工换行被误接。
+  /// 现按「排版自动折行」四条判据判定(行末贴右边界且无符号、下一行无缩进
+  /// 且行首无符号/序号)。
+  ///
+  /// 本侧没有几何信息,**以字符数当坐标**:`charW = 1`,版心右边界取段内最长
+  /// 行的字符数,行首缩进取行首空白数。规则函数与几何侧
+  /// (`text_position_service.buildSentences`) 完全共用,避免朗读单元与高亮
+  /// 单元异源(参见 G2.5.1 「只改一侧」缺陷)。
   List<String> _splitSentences(String text) {
     final normalized = text.replaceAll('\r\n', '\n');
-    final rawParts = normalized.split(RegExp(r'(?<=[。！？!?；;])'));
     final result = <String>[];
-    for (final part in rawParts) {
-      final sentence = part.trim();
-      if (sentence.isEmpty) continue;
-      result.addAll(_splitLong(sentence));
+
+    /// 把一段(空行分隔)内的多行按折行规则拼接后再按标点切句。
+    void emitBlock(List<String> rawLines) {
+      if (rawLines.isEmpty) return;
+      // 版心右边界 = 段内最长行字符数;左边界恒为 0(缩进由行首空白体现)
+      final blockRight = rawLines
+          .map((l) => l.trimRight().length)
+          .reduce((a, b) => a > b ? a : b)
+          .toDouble();
+
+      // 不合并处直接开新单元,不借助哨兵字符再切一遍
+      final units = <StringBuffer>[];
+      for (var i = 0; i < rawLines.length; i++) {
+        final raw = rawLines[i];
+        final trimmed = raw.trim();
+        if (trimmed.isEmpty) continue;
+
+        if (units.isEmpty) {
+          units.add(StringBuffer(trimmed));
+          continue;
+        }
+
+        final prevText = rawLines[i - 1].trimRight();
+        final prevLast = prevText.isEmpty ? '' : prevText[prevText.length - 1];
+        final indent = raw.length - raw.trimLeft().length;
+        final merge = canMergeLines(
+          prevRight: prevText.length.toDouble(),
+          blockRight: blockRight,
+          nextLeft: indent.toDouble(),
+          blockLeft: 0,
+          charW: 1,
+          prevLastChar: prevLast,
+          nextFirstChar: trimmed[0],
+          nextLineText: trimmed,
+        );
+        if (!merge) {
+          units.add(StringBuffer(trimmed));
+          continue;
+        }
+        // 拉丁文折行处原为词间空格,需补回;CJK 直接相连
+        if (needsSpaceBetween(prevLast, trimmed[0])) {
+          units.last.write(' ');
+        }
+        units.last.write(trimmed);
+      }
+
+      for (final unit in units) {
+        for (final part in unit.toString().split(RegExp(r'(?<=[。！？!?；;])'))) {
+          final sentence = part.trim();
+          if (sentence.isEmpty) continue;
+          result.addAll(_splitLong(sentence));
+        }
+      }
     }
+
+    // 空行 = 段落硬边界,先分段再在段内判折行
+    final block = <String>[];
+    for (final line in normalized.split('\n')) {
+      if (line.trim().isEmpty) {
+        emitBlock(block);
+        block.clear();
+      } else {
+        block.add(line);
+      }
+    }
+    emitBlock(block);
     return result;
   }
 

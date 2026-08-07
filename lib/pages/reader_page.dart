@@ -329,12 +329,15 @@ class _ReaderPageState extends State<ReaderPage> {
                         TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 if (files.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Center(
                         child: Text('还没有音频文件\n可在设置开启自动生成,或点导出按钮手动生成',
                             textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey))),
+                            style: TextStyle(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant))),
                   )
                 else
                   ConstrainedBox(
@@ -855,7 +858,7 @@ class _ReaderPageState extends State<ReaderPage> {
                       width: 40,
                       height: 4,
                       decoration: BoxDecoration(
-                        color: Colors.grey[400],
+                        color: Theme.of(context).colorScheme.outlineVariant,
                         borderRadius: BorderRadius.circular(2),
                       ),
                     ),
@@ -1630,8 +1633,10 @@ class _ReaderPageState extends State<ReaderPage> {
     bool loading = false,
     VoidCallback? onTap,
   }) {
-    final accent =
-        active ? Theme.of(context).colorScheme.primary : Colors.black87;
+    // 非选中态必须跟随主题(不能写死 Colors.black87), 否则深色模式下
+    // 深底黑字/黑图标几乎不可见。
+    final scheme = Theme.of(context).colorScheme;
+    final accent = active ? scheme.primary : scheme.onSurface;
     return InkWell(
       key: _toolbarKeys[index],
       borderRadius: BorderRadius.circular(10),

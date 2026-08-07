@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'dart:ui';
 
+import 'line_merge_rules.dart';
+
 // 坐标系与 PDFBox `extractTextPositions` 一致（页面点，原点在 CropBox 左上角，
 // y 向下）。本文所有矩形均为页面坐标，经 `PDFViewController.setHighlights`
 // 由原生侧绘制。
@@ -8,7 +10,8 @@ import 'dart:ui';
 /// 一个句子的几何与文本。
 ///
 /// 分句规则与 `TtsService._splitSentences` 对齐：以 `。！？!?；;` 为硬边界。
-/// **句子可以跨行**（v2.6.x #3 改动），此时 [rects] 含多个矩形（每行一个）。
+/// **句子可以跨行**（v2.6.x #3），但仅当换行处经 `canMergeLines` 判定为排版
+/// 自动折行时才合并；合并成立时 [rects] 含多个矩形（每行一个）。
 class SentenceBox {
   SentenceBox({required this.text, required this.rects});
 
@@ -64,7 +67,7 @@ class _Line {
 }
 
 /// 句子终止标点（与 `TtsService` 的正则 `(?<=[。！？!?；;])` 对齐，
-/// v2.6.x #3 起换行不再是硬边界）。
+/// v2.6.x #3 起换行改由 `canMergeLines` 逐处判定，不再是无条件硬边界）。
 const String _sentenceTerms = '。！？!?；;';
 
 double _fs(Map<Object?, Object?> c) =>
@@ -103,10 +106,16 @@ List<_Line> _buildLines(List<Map<Object?, Object?>> chars) {
 ///
 /// [chars] 需为 `extractTextPositions` 返回的 `chars`（阅读顺序）。
 ///
-/// 与 `TtsService._splitSentences` 对齐：换行**不是**边界，句子跨行累积，
-/// [SentenceBox.rects] 每行一个矩形。但**段落间隙仍是硬边界**——行间垂直
-/// 间隙 > [paraGapEm]×行高（出现空行）时强制断句，否则无标点文本（标题、
-/// 列表等）会把整页合成一句。
+/// 与 `TtsService._splitSentences` 对齐：换行**不是**无条件边界，但也**不是**
+/// 无条件合并——只有经 [canMergeLines] 判定为「排版自动折行」的换行处才把下
+/// 一行接到当前句尾（行末贴右边界且无符号、下一行无缩进且行首无符号/序号）。
+/// 合并成立时 [SentenceBox.rects] 每行一个矩形。
+///
+/// **段落间隙仍是硬边界**——行间垂直间隙 > [paraGapEm]×行高（出现空行）时强制
+/// 断句，否则无标点文本（标题、列表等）会把整页合成一句。
+///
+/// 版心左右边界（[canMergeLines] 的 `blockLeft`/`blockRight`）按**段落块内**
+/// 统计，不用整页：多栏排版与页眉页脚会把边界撑到不可用。
 ///
 /// 跨行拼接时按语种补空格：两侧均为拉丁字符才插入空格，CJK 不插。
 List<SentenceBox> buildSentences(
@@ -115,6 +124,7 @@ List<SentenceBox> buildSentences(
 }) {
   if (chars.isEmpty) return const [];
   final charH = _medianFs(chars) * 1.2;
+  final charW = _medianFs(chars); // 以字号近似单字宽（CJK 近似等宽）
   final result = <SentenceBox>[];
 
   // 跨行累积状态
@@ -146,46 +156,64 @@ List<SentenceBox> buildSentences(
     lastChar = '';
   }
 
-  double? prevBottom;
-  for (final line in _buildLines(chars)) {
-    if (prevBottom != null && line.top - prevBottom > paraGapEm * charH) {
-      flush(); // 空行 → 段落边界，硬断句
-    }
-    curTop = line.top;
-    curBottom = line.bottom;
+  // 先按段落间隙把行分块，块内统计版心左右边界供折行判定使用
+  for (final block in _splitLineBlocks(_buildLines(chars), paraGapEm * charH)) {
+    final blockLeft = block.map((l) => l.xMin).reduce((a, b) => a < b ? a : b);
+    final blockRight = block.map((l) => l.xMax).reduce((a, b) => a > b ? a : b);
 
-    // 跨行续接：拉丁文在换行处需补空格，CJK 直接相连
-    if (sb.isNotEmpty &&
-        line.chars.isNotEmpty &&
-        !_isCjk(lastChar) &&
-        !_isCjk(line.chars.first['c'].toString())) {
-      sb.write(' ');
-    }
+    for (var i = 0; i < block.length; i++) {
+      final line = block[i];
+      if (line.chars.isEmpty) continue;
 
-    for (final c in line.chars) {
-      final ch = c['c'].toString();
-      left = math.min(left, _x(c));
-      right = math.max(right, _x(c) + _w(c));
-      sb.write(ch);
-      lastChar = ch;
-      if (_sentenceTerms.contains(ch)) flush();
+      // 与上一行之间是否为自动折行：不是则先收句（当前行另起一句）
+      if (sb.isNotEmpty) {
+        final prev = block[i - 1];
+        final merge = canMergeLines(
+          prevRight: prev.xMax,
+          blockRight: blockRight,
+          nextLeft: line.xMin,
+          blockLeft: blockLeft,
+          charW: charW,
+          prevLastChar: lastChar,
+          nextFirstChar: line.chars.first['c'].toString(),
+          nextLineText: line.text,
+        );
+        if (!merge) {
+          flush();
+        } else if (needsSpaceBetween(
+            lastChar, line.chars.first['c'].toString())) {
+          sb.write(' '); // 拉丁文折行处原为词间空格，需补回
+        }
+      }
+
+      curTop = line.top;
+      curBottom = line.bottom;
+      for (final c in line.chars) {
+        final ch = c['c'].toString();
+        left = math.min(left, _x(c));
+        right = math.max(right, _x(c) + _w(c));
+        sb.write(ch);
+        lastChar = ch;
+        if (_sentenceTerms.contains(ch)) flush();
+      }
+      closeRect(); // 行尾收束矩形，句子是否延续由下一轮判定
     }
-    closeRect(); // 行尾收束矩形，但句子继续跨到下一行
-    prevBottom = line.bottom;
+    flush(); // 块（段落）结束必断句
   }
-  flush();
   return result;
 }
 
-/// 首字符是否为 CJK（含中日韩统一表意文字、兼容表意文字、中文标点、全角符号）。
-bool _isCjk(String s) {
-  if (s.isEmpty) return false;
-  final cp = s.codeUnitAt(0);
-  return (cp >= 0x3000 && cp <= 0x303F) || // CJK 标点
-      (cp >= 0x3400 && cp <= 0x4DBF) || // 扩展 A
-      (cp >= 0x4E00 && cp <= 0x9FFF) || // 基本区
-      (cp >= 0xF900 && cp <= 0xFAFF) || // 兼容表意
-      (cp >= 0xFF00 && cp <= 0xFFEF); // 全角
+/// 按垂直间隙把行序列切成段落块（间隙 > [gap] 即开新块）。
+List<List<_Line>> _splitLineBlocks(List<_Line> lines, double gap) {
+  final blocks = <List<_Line>>[];
+  for (final line in lines) {
+    if (blocks.isEmpty || line.top - blocks.last.last.bottom > gap) {
+      blocks.add([line]);
+    } else {
+      blocks.last.add(line);
+    }
+  }
+  return blocks;
 }
 
 /// 字符坐标 → 段落列表（句子定位失败时的兜底）。
