@@ -1,0 +1,217 @@
+name: G4.2 slimt Android arm64 交叉编译 (PoC)
+
+# [G4.2] 用 Android NDK 把 slimt 交叉编译成 arm64-v8a 的 libslimt.so。
+#
+# 前置: G4.1 已通过(run 31172293077) —— 上游未改动的 slimt 能正确加载
+# 中英 base 模型双向翻译:
+#   zh->en  HF mukowaty/firefox-translations zh-en/(单词表)      译文干净
+#   en->zh  GCS cjk_hplt2_lr0003_70x30_*(单词表)                 译文可用
+# 故本阶段只解决**交叉编译**, 不再验证模型正确性。
+#
+# 与 g4-slimt-poc.yml 并存而非替换: 后者是 x86_64 回归基线,
+# 编译选项与本文件不同(AVX2 vs NEON), 两条线要能各自独立复跑。
+#
+# ⚠️ 为什么带 push 触发器: workflow_dispatch 要求文件存在于**默认分支**
+# 才会出现在 Actions UI。docs/13 §6 规定 G4.1~G4.4 全过前不合入 main,
+# 故只能靠 push 到 G4 分支自触发。
+on:
+  push:
+    branches: [g4-offline-translate]
+    paths:
+      - '.github/workflows/g4-slimt-android.yml'
+  workflow_dispatch:
+
+jobs:
+  slimt-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      # 与 android/app/build.gradle 的 ndkVersion 一致(第 43 行), 不可漂移:
+      # 用别的版本编出来的 .so 在真机上可能因 libc++ ABI 差异崩。
+      NDK_VERSION: '27.0.12077973'
+      # abiFilters 只留 arm64-v8a(build.gradle 第 73 行), 故只编这一档。
+      ANDROID_ABI: 'arm64-v8a'
+      # ⚠️ minSdk 当前是 21(build.gradle 第 67 行), 但本轮先用 28 编。
+      # 理由: 21 缺 <sys/auxv.h> 的 getauxval 等 NEON 运行时探测常用符号,
+      # 且 ruy/xsimd 对老 API level 支持不稳。若 28 能编通再回落试 21,
+      # 编不通就要在 G4.3 决定是否抬 minSdk(会砍掉 Android 5.x 用户)。
+      ANDROID_PLATFORM: 'android-28'
+
+    steps:
+      - name: 检出 G4 分支
+        uses: actions/checkout@v4
+
+      - name: 核对 build.gradle 中的 NDK 与 ABI 配置
+        run: |
+          set -uo pipefail
+          echo "--- android/app/build.gradle 相关行(确认 env 未漂移):"
+          grep -nE 'ndkVersion|minSdk|targetSdk|compileSdk|abiFilters' \
+            android/app/build.gradle || true
+          echo
+          echo "workflow env: NDK=$NDK_VERSION ABI=$ANDROID_ABI PLATFORM=$ANDROID_PLATFORM"
+          # 只告警不阻断: 版本不一致时要人看见, 但不影响本轮探路。
+          grep -q "$NDK_VERSION" android/app/build.gradle \
+            && echo "  [ok] NDK 版本与 build.gradle 一致" \
+            || echo "  [warn] NDK 版本与 build.gradle 不一致, 注意 ABI 兼容性"
+
+      - name: 安装指定版本 NDK
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-未设置}"
+          # runner 自带若干 NDK, 但不一定有我们要的版本, 用 sdkmanager 精确装。
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMGR" || SDKMGR="$(find "$ANDROID_HOME" -name sdkmanager -type f | head -1)"
+          echo "sdkmanager: $SDKMGR"
+          yes | "$SDKMGR" --install "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
+          NDK_ROOT="$ANDROID_HOME/ndk/$NDK_VERSION"
+          test -d "$NDK_ROOT" || { echo "NDK 目录不存在: $NDK_ROOT"; ls -1 "$ANDROID_HOME/ndk" || true; exit 1; }
+          echo "NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          TC="$NDK_ROOT/build/cmake/android.toolchain.cmake"
+          test -f "$TC" || { echo "toolchain 文件缺失: $TC"; exit 1; }
+          echo "ANDROID_TOOLCHAIN=$TC" >> "$GITHUB_ENV"
+          echo "--- toolchain: $TC"
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -2
+
+      # 宿主侧只需要 cmake/ninja/git; sentencepiece/pcre2/BLAS 一律不装 ——
+      # 本轮刻意走「全内置」把外部依赖降到 0(docs/13 §G4.2 建议路径)。
+      - name: 安装构建工具 (不装任何目标侧依赖)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config
+          cmake --version
+          ninja --version
+
+      - name: 克隆 slimt
+        run: |
+          set -euo pipefail
+          # 固定到 G4.1 验证过的 commit, 避免上游漂移让两阶段结论对不上。
+          # 上游近乎停更(作者已转向 lemonade), 固定版本无维护成本。
+          git clone --recursive https://github.com/jerinphilip/slimt.git "$RUNNER_TEMP/slimt"
+          cd "$RUNNER_TEMP/slimt"
+          git checkout 9f0b1a20d14871cc94dbe65b7a3df128e5e81f55
+          git submodule update --init --recursive
+          echo "slimt HEAD: $(git rev-parse HEAD)"
+          echo "--- 3rd-party 子模块(确认内置依赖已就位):"
+          git submodule status || true
+          ls -1 3rd-party/ 2>/dev/null || true
+
+      # ============================================================
+      # 交叉编译 — 全内置组合
+      # ============================================================
+      # 选项名以 CMakeLists.txt 实测为准(G4.1 日志第 13-36 行), 不照抄文档:
+      #   WITH_GEMMOLOGY=ON          默认 ON, 矩阵乘走 gemmology
+      #   USE_NEON=ON                aarch64 SIMD, 替代 x86 的 AVX2/SSSE3/SSE2
+      #   USE_BUILTIN_SENTENCEPIECE  默认已是 ON, 显式写出防上游改默认值
+      #   SLIMT_USE_INTERNAL_PCRE2   ⚠️ 名字是 SLIMT_ 前缀不是 SSPLIT_,
+      #                              docs/13 §G4.2 写成 SSPLIT_ 是错的
+      #   WITH_BLAS=OFF              默认 ON, 关掉才会按 CMakeLists 第 19 行
+      #                              的注释 "Otherwise moves to ruy" 退到 ruy,
+      #                              避开 openblas 交叉编译
+      #   BUILD_SHARED=ON            我们要的就是 libslimt.so
+      #   WITH_TESTS=OFF             默认 OFF, 交叉编译跑不了测试
+      - name: 配置交叉编译 (全内置依赖)
+        id: configure
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          cmake -B build-android -S . -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_TOOLCHAIN" \
+            -DANDROID_ABI="$ANDROID_ABI" \
+            -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_GEMMOLOGY=ON \
+            -DUSE_NEON=ON \
+            -DUSE_BUILTIN_SENTENCEPIECE=ON \
+            -DSLIMT_USE_INTERNAL_PCRE2=ON \
+            -DWITH_BLAS=OFF \
+            -DBUILD_SHARED=ON \
+            -DBUILD_STATIC=ON \
+            -DWITH_TESTS=OFF 2>&1 | tee "$RUNNER_TEMP/configure.log"
+          echo "--- configure 退出码: ${PIPESTATUS[0]}"
+
+      - name: 编译 libslimt.so
+        id: build
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          test -d build-android || { echo "configure 未成功, 跳过编译"; exit 1; }
+          cmake --build build-android --parallel 2>&1 | tee "$RUNNER_TEMP/build.log"
+          rc="${PIPESTATUS[0]}"
+          echo "--- build 退出码: $rc"
+          echo
+          echo "--- 首批错误(便于下一轮定位, 不必翻全日志):"
+          grep -nE 'error:|fatal error:|undefined reference|No such file' \
+            "$RUNNER_TEMP/build.log" | head -30 || echo "(无错误行)"
+          exit "$rc"
+
+      # 通过标准(docs/13 §G4.2): file 确认是 ELF 64-bit LSB shared object,
+      # ARM aarch64。只看「编译成功」不够 —— 要防 toolchain 没生效编成了 x86_64。
+      - name: 验证产物架构
+        id: verify
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          echo "--- 所有 libslimt* 产物:"
+          find build-android -name 'libslimt*' -print 2>/dev/null || true
+          SO="$(find build-android -name 'libslimt.so' -type f | head -1)"
+          if [ -z "$SO" ]; then
+            echo "未找到 libslimt.so, 检查是否只产出了静态库:"
+            find build-android -name '*.a' | head -10
+            exit 1
+          fi
+          echo
+          echo "=== file 判定(通过标准):"
+          file "$SO"
+          file "$SO" | grep -q 'ELF 64-bit LSB shared object' \
+            && echo "  [ok] 是 64 位 ELF 共享库" || { echo "  [FAIL] 不是共享库"; exit 1; }
+          file "$SO" | grep -qE 'ARM aarch64|aarch64' \
+            && echo "  [ok] 是 ARM aarch64" || { echo "  [FAIL] 架构不是 aarch64"; exit 1; }
+          echo
+          echo "=== 体积(docs/13 预估 6-12MB):"
+          ls -lh "$SO"
+          echo
+          echo "=== 动态依赖(NEEDED 越少越好, 不应出现 libopenblas/libsentencepiece):"
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$SO" \
+            | grep -E 'NEEDED|SONAME' || true
+          echo
+          echo "=== 导出符号抽样(确认 slimt API 在):"
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only "$SO" 2>/dev/null \
+            | grep -iE 'slimt' | head -15 || echo "(nm 读取失败, 不阻断)"
+          echo "SO_PATH=$SO" >> "$GITHUB_ENV"
+
+      - name: 上传产物
+        if: steps.verify.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libslimt-arm64-v8a
+          path: ${{ env.SO_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: G4.2 门禁判定
+        if: always()
+        run: |
+          echo "configure:  ${{ steps.configure.outcome }}"
+          echo "build:      ${{ steps.build.outcome }}"
+          echo "verify:     ${{ steps.verify.outcome }}"
+          echo
+          echo "门禁标准(docs/13 §G4.2): 产出 libslimt.so 且 file 确认为"
+          echo "ELF 64-bit LSB shared object, ARM aarch64。"
+          echo
+          if [ "${{ steps.verify.outcome }}" = "success" ]; then
+            echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
+          else
+            echo "=> G4.2 未通过。按 docs/13 §G4.2 的备选路径逐个换:"
+            echo "   1. WITH_GEMMOLOGY=OFF + WITH_RUY=ON  (换矩阵乘后端)"
+            echo "   2. USE_NEON=OFF                      (退纯标量, 先求编通)"
+            echo "   3. ANDROID_PLATFORM 抬到 android-30  (排除 API level 缺符号)"
+            echo "   4. 上述都不行 -> 走 §1.2 bergamot-translator 回退"
+            echo
+            echo "本轮错误已在「编译 libslimt.so」步骤末尾摘出首 30 条。"
+          fi
