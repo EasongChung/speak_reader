@@ -26,17 +26,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    # ⚠️ android-28 已在第 5 轮通过(run 31179559220, artifact 5.8MB),
+    # 本轮加 android-21 探底: 21 = build.gradle:67 的 minSdk, 若能编通则
+    # 零兼容性代价; 编不通才需要决定是否抬 minSdk(会砍 Android 5.x 用户)。
+    #
+    # 28 留作对照组而非删掉: 若 21 失败而 28 也跟着失败, 说明是环境漂移
+    # (NDK/xsimd/pcre2 上游变动)而非 API level 问题, 免得误判。
+    # fail-fast: false —— 21 挂掉不能带走 28 的结论。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'android-21'
+            role: '探底(= minSdk, 目标档)'
+          - platform: 'android-28'
+            role: '对照组(第 5 轮已通过)'
+
+    name: slimt-android (${{ matrix.platform }})
+
     env:
       # 与 android/app/build.gradle 的 ndkVersion 一致(第 43 行), 不可漂移:
       # 用别的版本编出来的 .so 在真机上可能因 libc++ ABI 差异崩。
       NDK_VERSION: '27.0.12077973'
       # abiFilters 只留 arm64-v8a(build.gradle 第 73 行), 故只编这一档。
       ANDROID_ABI: 'arm64-v8a'
-      # ⚠️ minSdk 当前是 21(build.gradle 第 67 行), 但本轮先用 28 编。
-      # 理由: 21 缺 <sys/auxv.h> 的 getauxval 等 NEON 运行时探测常用符号,
-      # 且 ruy/xsimd 对老 API level 支持不稳。若 28 能编通再回落试 21,
-      # 编不通就要在 G4.3 决定是否抬 minSdk(会砍掉 Android 5.x 用户)。
-      ANDROID_PLATFORM: 'android-28'
+      # 由 matrix 注入。21 的已知风险: <sys/auxv.h> 的 getauxval 在
+      # API 18+ 才有(21 应当有), 但 ruy 的 CPU 特性探测与 xsimd 对老
+      # API level 支持不稳, 具体缺什么以本轮日志为准, 不预设结论。
+      ANDROID_PLATFORM: ${{ matrix.platform }}
 
     steps:
       - name: 检出 G4 分支
@@ -356,7 +373,9 @@ jobs:
         if: steps.verify.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: libslimt-arm64-v8a
+          # ⚠️ 必须带 platform 后缀: matrix 两个 job 同名会撞,
+          # 而 overwrite 默认 false, 后跑完的那个会直接失败。
+          name: libslimt-arm64-v8a-${{ matrix.platform }}
           path: ${{ env.SO_PATH }}
           # ⚠️ 必须 error 不能 warn: 本 gate 的意义就是拿到可用产物,
           # 找不到文件时静默放过会让门禁出假阳性(第 4 轮就是这么过的)。
@@ -377,11 +396,31 @@ jobs:
           # ⚠️ 必须同时判 upload: 第 4 轮 verify 通过(.so 确实是 aarch64)但
           # artifact 为空(路径相对基准写错 + if-no-files-found:warn 静默),
           # 只判 verify 就出了假阳性。产物拿不到 = G4.3 无从下手 = 没通过。
+          echo "本档: ${{ matrix.platform }}  角色: ${{ matrix.role }}"
+          echo
           if [ "${{ steps.verify.outcome }}" = "success" ] \
              && [ "${{ steps.upload.outcome }}" = "success" ]; then
-            echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
+            echo "=> ${{ matrix.platform }} 编译通过, artifact 已上传。"
+            if [ "${{ matrix.platform }}" = "android-21" ]; then
+              echo "   探底成功: 21 == build.gradle:67 的 minSdk, 故**无需抬"
+              echo "   minSdk**, Android 5.0 起全部机型可用, 零兼容性代价。"
+              echo "   G4.3 应改用本档产物(而非 28 档)。"
+            else
+              echo "   对照组通过, 说明构建链路本身正常(NDK/xsimd/pcre2 未漂移)。"
+            fi
           else
-            echo "=> G4.2 未通过。备选路径(已按本轮已排除项更新):"
+            if [ "${{ matrix.platform }}" = "android-21" ]; then
+              echo "=> android-21 探底失败。若 28 档同时通过, 则确属 API level"
+              echo "   问题而非环境漂移, 此时需你决定:"
+              echo "     a) 抬 minSdk 到 28  —— 砍掉 Android 5.0~8.1 机型"
+              echo "     b) 逐档二分 22/24/26 找最低可用档"
+              echo "     c) 保留 minSdk 21, 但离线翻译功能仅在 28+ 开放"
+              echo "        (运行时按 Build.VERSION.SDK_INT 判定并降级到在线翻译)"
+              echo "   推荐 c: 不牺牲任何现有用户, 老机型仍走原在线链路。"
+              echo "   具体缺什么符号见本 job「编译 libslimt.so」末尾的错误摘要。"
+              echo
+            fi
+            echo "=> 未通过。备选路径(已按累计已排除项更新):"
             echo "   1. 换回 gemmology 后端: WITH_GEMMOLOGY=ON + WITH_RUY=OFF"
             echo "      + WITH_BLAS=ON, 并为 arm64 交叉编 OpenBLAS。这与上游"
             echo "      CI(main.yml:212) 同构, 是唯一被上游验证过的组合,"
