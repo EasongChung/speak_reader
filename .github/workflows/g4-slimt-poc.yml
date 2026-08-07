@@ -1,0 +1,194 @@
+name: G4.1 slimt 桌面端验证 (PoC)
+
+# [G4.1] 在 ubuntu-latest (x86_64) 上编译 slimt 并验证中英互译。
+#
+# 为什么用 CI 而不是本地: 开发机无 cmake/gcc/NDK, WSL 1 挂载失败不可用,
+# 且宿主是 Windows ARM64。CI 提供干净的 x86_64 Linux 环境。
+#
+# 仅在 G4 分支上触发, 不监听 main:
+# 本 workflow 是一次性验证探针, 不产出 APK, 不发 Release,
+# 与 build-apk.yml 完全独立(后者只监听 main 的 push, G4 分支不会触发它)。
+#
+# ⚠️ 为什么带 push 触发器: workflow_dispatch 要求 workflow 文件存在于**默认分支**
+# 才会出现在 Actions UI / 才能被 gh workflow run 找到。而 docs/13 §6 规定
+# G4.1~G4.4 全过前不合入 main, 故只能靠 push 到 G4 分支自触发。
+on:
+  push:
+    branches: [g4-offline-translate]
+    paths:
+      - '.github/workflows/g4-slimt-poc.yml'
+  workflow_dispatch:
+    inputs:
+      model_pair:
+        description: '验证语向: both / zhen / enzh'
+        required: false
+        default: 'both'
+
+jobs:
+  slimt-desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出 G4 分支
+        uses: actions/checkout@v4
+
+      # slimt 的 CMake 假设这些依赖来自系统包管理器。
+      # 桌面端先用系统包把「引擎 + 模型 + 配置」三件套验证对,
+      # 交叉编译时再换成内置选项(G4.2 的主要工作量)。
+      - name: 安装系统依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config \
+            libsentencepiece-dev libopenblas-dev libpcre2-dev \
+            libxsimd-dev zstd
+          cmake --version
+          gcc --version | head -1
+
+      - name: 克隆 slimt
+        run: |
+          set -euo pipefail
+          git clone --recursive --depth 1 https://github.com/jerinphilip/slimt.git "$RUNNER_TEMP/slimt"
+          cd "$RUNNER_TEMP/slimt"
+          echo "slimt HEAD: $(git rev-parse HEAD)"
+          echo "--- 顶层 CMake 选项(供排错参照):"
+          grep -nE '^\s*option\(' CMakeLists.txt || true
+          echo "--- README 中的模型档位说明:"
+          grep -niE 'tiny|base|model' README.md | head -40 || true
+
+      - name: 配置并编译 slimt
+        id: build
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          # x86_64 桌面: 用 AVX2 + gemmology(xsimd)。
+          # aarch64 交叉编译时改为 -DUSE_NEON=ON, 见 docs/13 §1.1。
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_GEMMOLOGY=ON \
+            -DUSE_AVX2=ON \
+            -DUSE_BUILTIN_SENTENCEPIECE=OFF
+          cmake --build build --parallel
+          echo "--- 产物:"
+          find build -maxdepth 3 -type f -executable -name 'slimt*' -print
+          find build -name 'libslimt*' -print
+
+      # 模型来源: 官方 mozilla/firefox-translations-models 已 archived,
+      # 且 LFS 对象被服务器清除(batch API 返回 410), 指针在但实体没了。
+      # 改用 HF 镜像 mukowaty/firefox-translations —— 其 model.zhen 为
+      # 44369188 字节, 与官方 LFS 指针记录的 size 完全一致, 同一份文件。
+      #
+      # ⚠️ 中英只有 base 档, 没有 tiny 档(tiny/ 下 84 个语向均无中文)。
+      # slimt README 自称只支持 tiny, 这是 G4.1 的核心未知项。
+      - name: 下载中英 base 模型
+        run: |
+          set -euo pipefail
+          BASE='https://huggingface.co/mukowaty/firefox-translations/resolve/main'
+          DIR="$RUNNER_TEMP/models"
+
+          fetch() {
+            local rel="$1" dest="$2"
+            mkdir -p "$(dirname "$dest")"
+            echo "拉取 $rel"
+            curl -fsSL --retry 3 --retry-delay 2 -o "${dest}.gz" "${BASE}/${rel}"
+            gzip -dc "${dest}.gz" > "$dest"
+            rm -f "${dest}.gz"
+            ls -l "$dest"
+          }
+
+          # zh-en: 单 vocab
+          fetch 'zh-en/model.zhen.intgemm.alphas.bin' "$DIR/zhen/model.zhen.intgemm.alphas.bin"
+          fetch 'zh-en/vocab.zhen.spm'                "$DIR/zhen/vocab.zhen.spm"
+          fetch 'zh-en/lex.50.50.zhen.s2t.bin'        "$DIR/zhen/lex.50.50.zhen.s2t.bin"
+
+          # en-zh: src/trg 双 vocab —— 与 zh-en 形态不同, 加载代码须两种都支持
+          fetch 'en-zh/model.enzh.intgemm.alphas.bin' "$DIR/enzh/model.enzh.intgemm.alphas.bin"
+          fetch 'en-zh/srcvocab.enzh.spm'             "$DIR/enzh/srcvocab.enzh.spm"
+          fetch 'en-zh/trgvocab.enzh.spm'             "$DIR/enzh/trgvocab.enzh.spm"
+          fetch 'en-zh/lex.50.50.enzh.s2t.bin'        "$DIR/enzh/lex.50.50.enzh.s2t.bin"
+
+          echo "--- 解压后实际体积(判定 §5 下载流量与 §7 速度门禁基线):"
+          du -sh "$DIR"/*
+          du -ah "$DIR" | sort -k2
+      # slimt-cli 的参数形态需从实际 --help 确认, 不照抄文档。
+      # 这一步单独跑是为了: 即使后面翻译失败, 日志里也留下了正确的用法,
+      # 下一轮迭代不必再猜。
+      - name: 探明 slimt-cli 用法
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          CLI="$(find build -maxdepth 3 -type f -executable -name 'slimt*' | head -1)"
+          test -n "$CLI"
+          echo "CLI=$CLI" >> "$GITHUB_ENV"
+          echo "--- $CLI --help:"
+          "$CLI" --help 2>&1 || true
+
+      # 门禁核心: 中英双向能出译文。
+      # 不用 set -e 直接失败, 而是记录每一路的结果 ——
+      # 「zh-en 通过但 en-zh 失败」和「两路都失败」是不同的结论,
+      # 前者说明 base 模型可用只是双 vocab 形态没处理对, 后者才是 slimt 不支持 base。
+      - name: 验证中英互译
+        id: verify
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          DIR="$RUNNER_TEMP/models"
+          # push 触发时 inputs 为空, 缺省跑双向
+          PAIR='${{ inputs.model_pair }}'
+          PAIR="${PAIR:-both}"
+          rc_zhen=skip
+          rc_enzh=skip
+
+          run_one() {
+            local name="$1" root="$2" model="$3" vocab_args="$4" lex="$5" text="$6"
+            echo "=============== $name"
+            echo "输入: $text"
+            set -x
+            printf '%s\n' "$text" | "$CLI" \
+              --root "$root" \
+              --model "$model" \
+              $vocab_args \
+              --shortlist "$lex" 2>&1
+            local rc=$?
+            set +x
+            return $rc
+          }
+
+          if [ "$PAIR" = 'both' ] || [ "$PAIR" = 'zhen' ]; then
+            run_one 'zh-en (单 vocab)' "$DIR/zhen" \
+              'model.zhen.intgemm.alphas.bin' \
+              '--vocabulary vocab.zhen.spm' \
+              'lex.50.50.zhen.s2t.bin' \
+              '人工智能正在改变世界。这是一个测试句子。'
+            rc_zhen=$?
+            echo "zh-en 退出码: $rc_zhen"
+          fi
+
+          if [ "$PAIR" = 'both' ] || [ "$PAIR" = 'enzh' ]; then
+            run_one 'en-zh (双 vocab)' "$DIR/enzh" \
+              'model.enzh.intgemm.alphas.bin' \
+              '--vocabulary srcvocab.enzh.spm --vocabulary trgvocab.enzh.spm' \
+              'lex.50.50.enzh.s2t.bin' \
+              'Hello world. Artificial intelligence is changing the world.'
+            rc_enzh=$?
+            echo "en-zh 退出码: $rc_enzh"
+          fi
+
+          echo "rc_zhen=$rc_zhen" >> "$GITHUB_OUTPUT"
+          echo "rc_enzh=$rc_enzh" >> "$GITHUB_OUTPUT"
+
+      - name: G4.1 门禁判定
+        if: always()
+        run: |
+          echo "zh-en: ${{ steps.verify.outputs.rc_zhen }}"
+          echo "en-zh: ${{ steps.verify.outputs.rc_enzh }}"
+          echo
+          echo "门禁标准(docs/13 §G4.1): 命令行能把 Hello world 译成中文,"
+          echo "且把一段中文译成英文 —— 译文正确性由人工看上面日志判定,"
+          echo "退出码 0 只是必要条件。"
+          echo
+          echo "若两路均失败且原因是模型档位不被支持, 则触发 docs/13 §1.2"
+          echo "bergamot-translator 回退路径。"
+
