@@ -371,6 +371,17 @@ jobs:
           echo "--- 收集到 ${#ARCHIVES[@]} 个静态库:"
           printf '%s\n' "${ARCHIVES[@]}" | head -20
           [ "${#ARCHIVES[@]}" -gt 0 ] || { echo "未找到任何 .a, 检查 BUILD_STATIC"; exit 1; }
+
+          # ⚠️ pcre2 必须单独追加: 上面的 find 只扫 build-android/, 而
+          # SLIMT_USE_INTERNAL_PCRE2=OFF 时 pcre2 是**外部**预编交叉静态库,
+          # 装在 $PCRE2_ROOT/lib/ —— 不在构建目录里, find 收不到。
+          # 漏了它, libslimt.a 里 Regex.cc/Splitter.cc 引用的 pcre2_*_8
+          # 会在链接期全部 undefined(本轮实测 8 个符号)。
+          # 放在 ARCHIVES 之后: --start-group 内顺序无关, 但保持依赖在后更直观。
+          PCRE2_A="$PCRE2_ROOT/lib/libpcre2-8.a"
+          test -f "$PCRE2_A" || { echo "缺 pcre2 静态库: $PCRE2_A"; exit 1; }
+          ARCHIVES+=("$PCRE2_A")
+          echo "--- 追加外部 pcre2: $PCRE2_A"
           echo
 
           # -static-libstdc++: 与 G4.2 的 libslimt.so 口径一致, STL 静态链入,
@@ -580,6 +591,10 @@ jobs:
             echo "          属 slimt 私有 include 目录, 却被公共头链拽进 TU ->"
             echo "          改为从 compile_commands.json 抄 slimt 本体 TU 的"
             echo "          全部 -I/-isystem/-D, 不再手工维护清单"
+            echo " · 第7轮: JNI 链接漏 pcre2 —— find 只扫 build-android/, 而"
+            echo "          SLIMT_USE_INTERNAL_PCRE2=OFF 时 pcre2 是外部预编库,"
+            echo "          装在 \$PCRE2_ROOT/lib/ 不在构建目录 -> 8 个 pcre2_*_8"
+            echo "          符号 undefined; 已显式追加 libpcre2-8.a"
             echo " · 探底轮: ANDROID_PLATFORM=21 编不过, 唯一根因是 Aligned.cc:51"
             echo "          的 aligned_alloc(C11, Bionic 从 API 28 才提供),"
             echo "          与 SIMD/后端选型无关 -> 已锁 28, 不要再往下试"
