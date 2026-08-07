@@ -120,11 +120,17 @@ jobs:
           BASE='https://huggingface.co/mukowaty/firefox-translations/resolve/main'
           DIR="$RUNNER_TEMP/models"
 
+          # ⚠️ 仓库里存的就是 .gz 文件本身(HF 不会按需解压, 也不会自动补后缀),
+          # 故 URL 必须显式带 .gz —— 上一轮漏了它, 直接 404。
+          # 已用 HF API(/api/models/<repo>, 415 个文件)核对过真实路径形态:
+          #   zh-en/model.zhen.intgemm.alphas.bin.gz  单 vocab: vocab.zhen.spm.gz
+          #   en-zh/model.enzh.intgemm.alphas.bin.gz  双 vocab: src/trgvocab.enzh.spm.gz
+          # 另有 zh_hant 繁体语向与每个语向的 model.json, 本轮不用。
           fetch() {
             local rel="$1" dest="$2"
             mkdir -p "$(dirname "$dest")"
-            echo "拉取 $rel"
-            curl -fsSL --retry 3 --retry-delay 2 -o "${dest}.gz" "${BASE}/${rel}"
+            echo "拉取 ${rel}.gz"
+            curl -fsSL --retry 3 --retry-delay 2 -o "${dest}.gz" "${BASE}/${rel}.gz"
             gzip -dc "${dest}.gz" > "$dest"
             rm -f "${dest}.gz"
             ls -l "$dest"
@@ -179,6 +185,17 @@ jobs:
       # 不用 set -e 直接失败, 而是记录每一路的结果 ——
       # 「zh-en 通过但 en-zh 失败」和「两路都失败」是不同的结论,
       # 前者说明 base 模型可用只是双 vocab 形态没处理对, 后者才是 slimt 不支持 base。
+      #
+      # ⚠️ 已从源码确认: slimt 现版本表达不了双 vocab。
+      #   Model.hh:24-26  struct Package 只有单个 vocabulary 字段
+      #   Model.hh:79     Model 内部也只持有一个 vocabulary_
+      #   Vocabulary.hh:16-17  构造函数只接受单个 fpath/View
+      #   app/main.cc:45  CLI 只有一个 --vocabulary(CLI11 单值 option,
+      #                   传两次是后值覆盖前值, 不是追加)
+      # 故 en-zh 用 srcvocab/trgvocab 双文件的形态无法喂进去。
+      # 下面对 en-zh 分别用 srcvocab / trgvocab 单独试一次, 以确认
+      # 「失败是因为双 vocab 表达不了」而非「base 档加载不了」——
+      # 两者结论不同: 前者可能有变通(合并词表/改用其他语向), 后者才转 bergamot。
       - name: 验证中英互译
         id: verify
         run: |
@@ -192,14 +209,14 @@ jobs:
           rc_enzh=skip
 
           run_one() {
-            local name="$1" root="$2" model="$3" vocab_args="$4" lex="$5" text="$6"
+            local name="$1" root="$2" model="$3" vocab="$4" lex="$5" text="$6"
             echo "=============== $name"
             echo "输入: $text"
             set -x
             printf '%s\n' "$text" | "$CLI" \
               --root "$root" \
               --model "$model" \
-              $vocab_args \
+              --vocabulary "$vocab" \
               --shortlist "$lex" 2>&1
             local rc=$?
             set +x
@@ -207,9 +224,9 @@ jobs:
           }
 
           if [ "$PAIR" = 'both' ] || [ "$PAIR" = 'zhen' ]; then
-            run_one 'zh-en (单 vocab)' "$DIR/zhen" \
+            run_one 'zh-en (单 vocab, 形态与 slimt 匹配)' "$DIR/zhen" \
               'model.zhen.intgemm.alphas.bin' \
-              '--vocabulary vocab.zhen.spm' \
+              'vocab.zhen.spm' \
               'lex.50.50.zhen.s2t.bin' \
               '人工智能正在改变世界。这是一个测试句子。'
             rc_zhen=$?
@@ -217,13 +234,21 @@ jobs:
           fi
 
           if [ "$PAIR" = 'both' ] || [ "$PAIR" = 'enzh' ]; then
-            run_one 'en-zh (双 vocab)' "$DIR/enzh" \
+            # 双 vocab 表达不了, 分别用 src / trg 试, 看报错是否指向词表不匹配
+            run_one 'en-zh (仅 srcvocab, 预期不匹配)' "$DIR/enzh" \
               'model.enzh.intgemm.alphas.bin' \
-              '--vocabulary srcvocab.enzh.spm --vocabulary trgvocab.enzh.spm' \
+              'srcvocab.enzh.spm' \
               'lex.50.50.enzh.s2t.bin' \
               'Hello world. Artificial intelligence is changing the world.'
-            rc_enzh=$?
-            echo "en-zh 退出码: $rc_enzh"
+            rc_src=$?
+            run_one 'en-zh (仅 trgvocab, 预期不匹配)' "$DIR/enzh" \
+              'model.enzh.intgemm.alphas.bin' \
+              'trgvocab.enzh.spm' \
+              'lex.50.50.enzh.s2t.bin' \
+              'Hello world. Artificial intelligence is changing the world.'
+            rc_trg=$?
+            echo "en-zh 退出码: srcvocab=$rc_src trgvocab=$rc_trg"
+            rc_enzh="src=$rc_src,trg=$rc_trg"
           fi
 
           echo "rc_zhen=$rc_zhen" >> "$GITHUB_OUTPUT"
