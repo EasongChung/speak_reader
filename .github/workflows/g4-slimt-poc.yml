@@ -40,10 +40,19 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
+          # libprotobuf-lite 是 sentencepiece.pc 的 Requires 依赖, 但
+          # libsentencepiece-dev 不会自动拉入 —— 缺它 pkg_check_modules 会报
+          # "Package 'protobuf-lite', required by 'sentencepiece', not found"
+          # 进而整体报 sentencepiece 未找到(误导性错误, 实际 sentencepiece 已装)。
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git pkg-config \
-            libsentencepiece-dev libopenblas-dev libpcre2-dev \
+            libsentencepiece-dev libprotobuf-lite-dev protobuf-compiler \
+            libopenblas-dev libpcre2-dev \
             libxsimd-dev zstd
+          echo "--- sentencepiece.pc 内容(确认依赖已满足):"
+          cat /usr/lib/x86_64-linux-gnu/pkgconfig/sentencepiece.pc 2>/dev/null || \
+            find / -name 'sentencepiece.pc' 2>/dev/null | head -3
+          pkg-config --exists --print-errors sentencepiece && echo "sentencepiece pkg-config OK"
           cmake --version
           gcc --version | head -1
 
@@ -81,7 +90,11 @@ jobs:
       # 44369188 字节, 与官方 LFS 指针记录的 size 完全一致, 同一份文件。
       #
       # ⚠️ 中英只有 base 档, 没有 tiny 档(tiny/ 下 84 个语向均无中文)。
-      # slimt README 自称只支持 tiny, 这是 G4.1 的核心未知项。
+      # 而 slimt README 明确写着 "`base` models are planned"(即尚未支持),
+      # 其内置下载器 `slimt download -m <pair>-tiny` 也只认 tiny 后缀。
+      # 参数表虽然列了 base 的 emb 512 / ffn 2048 / 39.0M / 38MB(i8),
+      # 但那是模型规格说明, 不等于 slimt 已实现对它的加载。
+      # → 这是 G4.1 最可能不通过的点, 若加载失败即触发 §1.2 bergamot 回退。
       - name: 下载中英 base 模型
         run: |
           set -euo pipefail
@@ -124,6 +137,24 @@ jobs:
           echo "CLI=$CLI" >> "$GITHUB_ENV"
           echo "--- $CLI --help:"
           "$CLI" --help 2>&1 || true
+
+      # 对照实验: 用 slimt 官方支持的 en-de tiny 跑一遍。
+      # 目的是把「slimt 引擎/编译本身有问题」与「slimt 不支持 base 档」区分开 ——
+      # 若本步过而中英 base 不过, 结论是 base 档不被支持(转 bergamot);
+      # 若本步也不过, 说明编译产物或用法本身有问题, 不能据此否定 base。
+      # 缺这个对照就只能看到「中英失败」这一个事实, 无法定位是哪一侧的问题。
+      - name: 对照组 en-de tiny (slimt 官方支持档位)
+        id: control
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          "$CLI" download -m en-de-tiny 2>&1 || echo "内置下载器失败(可能需要网络或路径参数)"
+          echo "--- 下载落点:"
+          find "$HOME" -maxdepth 6 -name '*.spm' -o -maxdepth 6 -name 'model*.bin' 2>/dev/null | head -10
+          echo "--- 尝试翻译 en->de:"
+          printf 'Hello world.\n' | "$CLI" -m en-de-tiny 2>&1 || \
+            echo "en-de tiny 翻译失败, 退出码 $?"
 
       # 门禁核心: 中英双向能出译文。
       # 不用 set -e 直接失败, 而是记录每一路的结果 ——
