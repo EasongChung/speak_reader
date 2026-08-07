@@ -319,22 +319,48 @@ jobs:
           echo "=== 体积(docs/13 预估 6-12MB):"
           ls -lh "$SO"
           echo
+          # ⚠️ 第 4 轮这两条命令的输出没进日志: 原写法把 stderr 丢了
+          # (nm 那条还显式 2>/dev/null), 且 `cmd | grep || true` 的 || 作用于
+          # 整条管道, 工具本身执行失败也会被静默吞掉。改为先探测工具存在,
+          # 再让 stderr 可见 —— NEEDED 段直接决定 G4.3 能否 loadLibrary,
+          # 不能是个看不见结果的检查。
+          LLVM_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
           echo "=== 动态依赖(NEEDED 越少越好, 不应出现 libopenblas/libsentencepiece):"
-          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$SO" \
-            | grep -E 'NEEDED|SONAME' || true
+          if [ -x "$LLVM_BIN/llvm-readelf" ]; then
+            "$LLVM_BIN/llvm-readelf" --dynamic-table "$SO" 2>&1 \
+              | grep -E 'NEEDED|SONAME' || echo "(readelf 无 NEEDED/SONAME 输出)"
+          else
+            echo "(llvm-readelf 不在 $LLVM_BIN, 回退用 readelf)"
+            readelf -d "$SO" 2>&1 | grep -E 'NEEDED|SONAME' \
+              || echo "(readelf 也无输出)"
+          fi
           echo
           echo "=== 导出符号抽样(确认 slimt API 在):"
-          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only "$SO" 2>/dev/null \
-            | grep -iE 'slimt' | head -15 || echo "(nm 读取失败, 不阻断)"
-          echo "SO_PATH=$SO" >> "$GITHUB_ENV"
+          if [ -x "$LLVM_BIN/llvm-nm" ]; then
+            "$LLVM_BIN/llvm-nm" --dynamic --defined-only "$SO" 2>&1 \
+              | grep -iE 'slimt' | head -15 || echo "(未抽到 slimt 符号)"
+          else
+            nm -D --defined-only "$SO" 2>&1 | grep -iE 'slimt' | head -15 \
+              || echo "(nm 未抽到)"
+          fi
+          echo
+          # ⚠️ 必须写**绝对路径**: upload-artifact 的 path 相对
+          # GITHUB_WORKSPACE(仓库检出目录)解析, 而这里 cd 到了
+          # $RUNNER_TEMP/slimt。第 4 轮写相对路径导致
+          #   "No files were found with the provided path" -> artifact 为空,
+          # 而 if-no-files-found: warn 把它降级成 warning, 门禁误判为通过。
+          echo "SO_PATH=$(realpath "$SO")" >> "$GITHUB_ENV"
 
       - name: 上传产物
+        id: upload
         if: steps.verify.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: libslimt-arm64-v8a
           path: ${{ env.SO_PATH }}
-          if-no-files-found: warn
+          # ⚠️ 必须 error 不能 warn: 本 gate 的意义就是拿到可用产物,
+          # 找不到文件时静默放过会让门禁出假阳性(第 4 轮就是这么过的)。
+          if-no-files-found: error
           retention-days: 14
 
       - name: G4.2 门禁判定
@@ -343,11 +369,16 @@ jobs:
           echo "configure:  ${{ steps.configure.outcome }}"
           echo "build:      ${{ steps.build.outcome }}"
           echo "verify:     ${{ steps.verify.outcome }}"
+          echo "upload:     ${{ steps.upload.outcome }}"
           echo
           echo "门禁标准(docs/13 §G4.2): 产出 libslimt.so 且 file 确认为"
-          echo "ELF 64-bit LSB shared object, ARM aarch64。"
+          echo "ELF 64-bit LSB shared object, ARM aarch64, 并成功上传 artifact。"
           echo
-          if [ "${{ steps.verify.outcome }}" = "success" ]; then
+          # ⚠️ 必须同时判 upload: 第 4 轮 verify 通过(.so 确实是 aarch64)但
+          # artifact 为空(路径相对基准写错 + if-no-files-found:warn 静默),
+          # 只判 verify 就出了假阳性。产物拿不到 = G4.3 无从下手 = 没通过。
+          if [ "${{ steps.verify.outcome }}" = "success" ] \
+             && [ "${{ steps.upload.outcome }}" = "success" ]; then
             echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
           else
             echo "=> G4.2 未通过。备选路径(已按本轮已排除项更新):"
