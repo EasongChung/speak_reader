@@ -81,10 +81,22 @@ jobs:
           cd "$RUNNER_TEMP/slimt"
           # x86_64 桌面: 用 AVX2 + gemmology(xsimd)。
           # aarch64 交叉编译时改为 -DUSE_NEON=ON, 见 docs/13 §1.1。
+          #
+          # ⚠️ SSSE3/SSE2 必须与 AVX2 一起开, 缺一不可 —— 上一轮只开 USE_AVX2
+          # 导致链接失败(undefined reference to gemmology::Engine<xsimd::sse2>
+          # 等一批符号)。根因在 slimt/qmm/Gemmology.cc:
+          #   第 6-20 行  宏链是 #elif 级联, 开 USE_AVX2 时 SUPPORTED_ARCHS
+          #               展开为 arch_list<avx2, ssse3, sse2> —— 运行时按实际
+          #               CPU 派发到这三档中任一档, 故三档定义都得在;
+          #   第 24-88 行 显式实例化却是各自独立的 #ifdef, 只开 USE_AVX2
+          #               就只生成 avx2 一档, ssse3/sse2 全缺。
+          # 即 "声明三档、只定义一档", 两处门控口径不一致, 必须手工对齐。
           cmake -B build -S . -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DWITH_GEMMOLOGY=ON \
             -DUSE_AVX2=ON \
+            -DUSE_SSSE3=ON \
+            -DUSE_SSE2=ON \
             -DUSE_BUILTIN_SENTENCEPIECE=OFF
           cmake --build build --parallel
           echo "--- 产物:"
