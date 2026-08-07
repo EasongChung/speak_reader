@@ -40,19 +40,26 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          # libprotobuf-lite 是 sentencepiece.pc 的 Requires 依赖, 但
-          # libsentencepiece-dev 不会自动拉入 —— 缺它 pkg_check_modules 会报
-          # "Package 'protobuf-lite', required by 'sentencepiece', not found"
-          # 进而整体报 sentencepiece 未找到(误导性错误, 实际 sentencepiece 已装)。
+          # libprotobuf-dev 是 sentencepiece.pc 的 Requires 依赖来源:
+          # sentencepiece.pc 需要 protobuf-lite.pc, 后者由 libprotobuf-dev 提供
+          # (noble 上没有独立的 libprotobuf-lite-dev 包 —— 已实测确认)。
+          # 缺它时 pkg_check_modules 会报 "Package 'protobuf-lite', required by
+          # 'sentencepiece', not found" 进而整体报 sentencepiece 未找到,
+          # 是误导性错误: sentencepiece 本身其实已装好。
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git pkg-config \
-            libsentencepiece-dev libprotobuf-lite-dev protobuf-compiler \
+            libsentencepiece-dev libprotobuf-dev protobuf-compiler \
             libopenblas-dev libpcre2-dev \
             libxsimd-dev zstd
           echo "--- sentencepiece.pc 内容(确认依赖已满足):"
           cat /usr/lib/x86_64-linux-gnu/pkgconfig/sentencepiece.pc 2>/dev/null || \
             find / -name 'sentencepiece.pc' 2>/dev/null | head -3
-          pkg-config --exists --print-errors sentencepiece && echo "sentencepiece pkg-config OK"
+          # 预检: pkg-config 能解析全部依赖再进 CMake。
+          # 否则 CMake 只会报 "sentencepiece not found" 这种指向错误的信息,
+          # 真实缺失项被掩盖, 要多烧一轮 CI 才能定位。
+          for m in sentencepiece protobuf-lite; do
+            pkg-config --exists --print-errors "$m" && echo "  [ok] $m"
+          done
           cmake --version
           gcc --version | head -1
 
