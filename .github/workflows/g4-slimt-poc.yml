@@ -150,6 +150,28 @@ jobs:
           echo "--- 解压后实际体积(判定 §5 下载流量与 §7 速度门禁基线):"
           du -sh "$DIR"/*
           du -ah "$DIR" | sort -k2
+      # 下载 marian 的 nonbreaking_prefixes 供实验 2 使用。
+      # slimt 的 load_splitter 对空 prefix_path 只打一条 warn 就返回空 splitter,
+      # 所以不喂这个文件的话, 即使把 --split-mode 改成 paragraph 也切不了句。
+      - name: 下载 ssplit 前缀表 (实验 2 用)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          DIR="$RUNNER_TEMP/models"
+          # ssplit-cpp 的英文 nonbreaking prefixes
+          for u in \
+            'https://raw.githubusercontent.com/ugermann/ssplit-cpp/master/nonbreaking_prefixes/nonbreaking_prefix.en' \
+            'https://raw.githubusercontent.com/marian-nmt/moses-scripts/master/share/nonbreaking_prefixes/nonbreaking_prefix.en'
+          do
+            echo "尝试: $u"
+            if curl -fsSL --retry 2 -o "$DIR/nonbreaking_prefix.en" "$u"; then
+              echo "  [ok] 命中"
+              wc -l "$DIR/nonbreaking_prefix.en"
+              break
+            fi
+          done
+          ls -l "$DIR/nonbreaking_prefix.en" 2>/dev/null || echo "前缀表未取到, 实验 2 将退化为无 splitter"
+
       # slimt-cli 的参数形态需从实际 --help 确认, 不照抄文档。
       # 这一步单独跑是为了: 即使后面翻译失败, 日志里也留下了正确的用法,
       # 下一轮迭代不必再猜。
@@ -163,107 +185,132 @@ jobs:
           echo "--- $CLI --help:"
           "$CLI" --help 2>&1 || true
 
-      # 对照实验: 用 slimt 官方支持的 en-de tiny 跑一遍。
-      # 目的是把「slimt 引擎/编译本身有问题」与「slimt 不支持 base 档」区分开 ——
-      # 若本步过而中英 base 不过, 结论是 base 档不被支持(转 bergamot);
-      # 若本步也不过, 说明编译产物或用法本身有问题, 不能据此否定 base。
-      # 缺这个对照就只能看到「中英失败」这一个事实, 无法定位是哪一侧的问题。
+      # 对照实验 3: 用 slimt 官方支持的 en-de tiny 跑一遍, 建立引擎行为基线。
+      #
+      # ⚠️ 上一轮这里用了 `$CLI download -m en-de-tiny`, 但 slimt-cli **没有**
+      # download 子命令, 也没有 -m 短选项(--help 实测只有 --root/--model/
+      # --vocabulary/--shortlist 一组显式路径参数)。CLI11 报
+      # "The following arguments were not expected: en-de-tiny -m download",
+      # 退出码 109 —— 对照证据整轮作废。本轮改为手动下载 + 显式路径。
       - name: 对照组 en-de tiny (slimt 官方支持档位)
         id: control
         continue-on-error: true
         run: |
           set -uo pipefail
           cd "$RUNNER_TEMP/slimt"
-          "$CLI" download -m en-de-tiny 2>&1 || echo "内置下载器失败(可能需要网络或路径参数)"
-          echo "--- 下载落点:"
-          find "$HOME" -maxdepth 6 -name '*.spm' -o -maxdepth 6 -name 'model*.bin' 2>/dev/null | head -10
-          echo "--- 尝试翻译 en->de:"
-          printf 'Hello world.\n' | "$CLI" -m en-de-tiny 2>&1 || \
-            echo "en-de tiny 翻译失败, 退出码 $?"
+          D="$RUNNER_TEMP/ende"
+          B='https://huggingface.co/mukowaty/firefox-translations/resolve/main/en-de'
+          mkdir -p "$D"
+          for f in model.ende.intgemm.alphas.bin vocab.deen.spm lex.50.50.ende.s2t.bin; do
+            curl -fsSL --retry 2 -o "$D/$f.gz" "$B/$f.gz" && gzip -df "$D/$f.gz" && echo "  [ok] $f"
+          done
+          ls -l "$D" || true
+          echo "--- en->de 单句(与实验 1 同口径):"
+          printf 'Hello world.\n' | "$CLI" \
+            --root "$D" \
+            --model model.ende.intgemm.alphas.bin \
+            --vocabulary vocab.deen.spm \
+            --shortlist lex.50.50.ende.s2t.bin 2>&1
+          echo "对照组退出码: $?"
 
-      # 门禁核心: 中英双向能出译文。
-      # 不用 set -e 直接失败, 而是记录每一路的结果 ——
-      # 「zh-en 通过但 en-zh 失败」和「两路都失败」是不同的结论,
-      # 前者说明 base 模型可用只是双 vocab 形态没处理对, 后者才是 slimt 不支持 base。
+      # ============================================================
+      # 实验 1 — 单句输入（直接判据）
+      # ============================================================
+      # 上一轮 zh-en 首句正确、次句重复退化: "Artificial intelligence is
+      # changing the world. It's changing the world. It"。
       #
-      # ⚠️ 已从源码确认: slimt 现版本表达不了双 vocab。
-      #   Model.hh:24-26  struct Package 只有单个 vocabulary 字段
-      #   Model.hh:79     Model 内部也只持有一个 vocabulary_
-      #   Vocabulary.hh:16-17  构造函数只接受单个 fpath/View
-      #   app/main.cc:45  CLI 只有一个 --vocabulary(CLI11 单值 option,
-      #                   传两次是后值覆盖前值, 不是追加)
-      # 故 en-zh 用 srcvocab/trgvocab 双文件的形态无法喂进去。
-      # 下面对 en-zh 分别用 srcvocab / trgvocab 单独试一次, 以确认
-      # 「失败是因为双 vocab 表达不了」而非「base 档加载不了」——
-      # 两者结论不同: 前者可能有变通(合并词表/改用其他语向), 后者才转 bergamot。
-      - name: 验证中英互译
-        id: verify
+      # 已排除架构参数假设: Model.cc 中 preset::base() 与 preset::tiny()
+      # 参数完全相同(6/2/2/8), 且日志里只有两条良性 warn(Wemb_QuantMultA /
+      # special:model.yml), 无任何 decoder_l3/l4 的 "Failed to ingest"。
+      # Bergamot base 与 tiny 差在**宽度**不是深度, 实际层数由权重 shape 读。
+      #
+      # 根因: split_mode 默认 "sentence" -> OneSentencePerLine, 把单行两句
+      # 当**一句**送进解码器。模型本身训练分布是单句, 超出后逐步失稳。
+      #
+      # 本实验分句输入: 若单句干净, 则 base 档可用, 只需 Dart 侧按句喂 ——
+      # 恰好与 TtsService._splitSentences(。！？!?；;) 天然契合。
+      - name: 实验 1 — 单句输入 (zh-en base)
+        id: exp1
         run: |
           set -uo pipefail
           cd "$RUNNER_TEMP/slimt"
-          DIR="$RUNNER_TEMP/models"
-          # push 触发时 inputs 为空, 缺省跑双向
-          PAIR='${{ inputs.model_pair }}'
-          PAIR="${PAIR:-both}"
-          rc_zhen=skip
-          rc_enzh=skip
+          D="$RUNNER_TEMP/models/zhen"
+          echo "每行一句, 避免 split_mode=sentence 把多句当一句处理:"
+          printf '人工智能正在改变世界。\n这是一个测试句子。\n科技改变生活。\n' | \
+            "$CLI" \
+              --root "$D" \
+              --model model.zhen.intgemm.alphas.bin \
+              --vocabulary vocab.zhen.spm \
+              --shortlist lex.50.50.zhen.s2t.bin 2>&1
+          echo "--- 退出码: $?"
 
-          run_one() {
-            local name="$1" root="$2" model="$3" vocab="$4" lex="$5" text="$6"
-            echo "=============== $name"
-            echo "输入: $text"
-            set -x
-            printf '%s\n' "$text" | "$CLI" \
-              --root "$root" \
-              --model "$model" \
-              --vocabulary "$vocab" \
-              --shortlist "$lex" 2>&1
-            local rc=$?
-            set +x
-            return $rc
-          }
-
-          if [ "$PAIR" = 'both' ] || [ "$PAIR" = 'zhen' ]; then
-            run_one 'zh-en (单 vocab, 形态与 slimt 匹配)' "$DIR/zhen" \
-              'model.zhen.intgemm.alphas.bin' \
-              'vocab.zhen.spm' \
-              'lex.50.50.zhen.s2t.bin' \
-              '人工智能正在改变世界。这是一个测试句子。'
-            rc_zhen=$?
-            echo "zh-en 退出码: $rc_zhen"
+      # ============================================================
+      # 实验 2 — 多句 + splitter（确认切分链路）
+      # ============================================================
+      # 验证 slimt 能否通过 --ssplit + --split-mode paragraph 自行切句。
+      # 决定 Dart 侧要不要承担切句责任。上一轮 ssplit 空 -> load_splitter
+      # 只打 warn 返回空 splitter, paragraph 模式也切不了句。
+      - name: 实验 2 — 多句单行 + splitter (zh-en base)
+        id: exp2
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          D="$RUNNER_TEMP/models/zhen"
+          PREFIX="$RUNNER_TEMP/models/nonbreaking_prefix.en"
+          if [ -f "$PREFIX" ]; then
+            echo "用 splitter + paragraph 模式处理多句单行:"
+            printf '人工智能正在改变世界。这是一个测试句子。科技改变生活。' | \
+              "$CLI" \
+                --root "$D" \
+                --model model.zhen.intgemm.alphas.bin \
+                --vocabulary vocab.zhen.spm \
+                --shortlist lex.50.50.zhen.s2t.bin \
+                --ssplit "$PREFIX" \
+                --split-mode paragraph 2>&1
+            echo "--- 退出码: $?"
+          else
+            echo "前缀表未取到, 跳过实验 2"
           fi
 
-          if [ "$PAIR" = 'both' ] || [ "$PAIR" = 'enzh' ]; then
-            # 双 vocab 表达不了, 分别用 src / trg 试, 看报错是否指向词表不匹配
-            run_one 'en-zh (仅 srcvocab, 预期不匹配)' "$DIR/enzh" \
-              'model.enzh.intgemm.alphas.bin' \
-              'srcvocab.enzh.spm' \
-              'lex.50.50.enzh.s2t.bin' \
-              'Hello world. Artificial intelligence is changing the world.'
-            rc_src=$?
-            run_one 'en-zh (仅 trgvocab, 预期不匹配)' "$DIR/enzh" \
-              'model.enzh.intgemm.alphas.bin' \
-              'trgvocab.enzh.spm' \
-              'lex.50.50.enzh.s2t.bin' \
-              'Hello world. Artificial intelligence is changing the world.'
-            rc_trg=$?
-            echo "en-zh 退出码: srcvocab=$rc_src trgvocab=$rc_trg"
-            rc_enzh="src=$rc_src,trg=$rc_trg"
-          fi
-
-          echo "rc_zhen=$rc_zhen" >> "$GITHUB_OUTPUT"
-          echo "rc_enzh=$rc_enzh" >> "$GITHUB_OUTPUT"
+      # en-zh 双 vocab 已从源码坐实结构性不通, 本轮不再浪费步骤重跑:
+      #   Model.hh:24-26      struct Package 只有单个 vocabulary 字段
+      #   Model.hh:79         Model 内部也只持有一个 vocabulary_
+      #   Vocabulary.hh:16-17 构造函数只接受单个 fpath/View
+      #   app/main.cc:45      CLI 只有一个 --vocabulary(单值 option, 后值覆盖)
+      # 上一轮实测两路均乱码(srcvocab: ", NTT,ty per. 70:18 per";
+      # trgvocab: ", NTT,不可分割的更多Kan Computing珊瑚, , ,"), 与分析一致。
+      #
+      # 改为探路: 是否存在**单 vocab** 的英中语向可替代。
+      # 这条关系到 OCR->朗读的主场景(en->zh), 是 slimt 路线的核心风险。
+      - name: 探路 — 是否有单 vocab 的英中语向
+        id: probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "枚举 HF 镜像里所有含 zh 的语向及其 vocab 形态:"
+          curl -fsSL 'https://huggingface.co/api/models/mukowaty/firefox-translations' \
+            | tr ',' '\n' | grep -o '"rfilename":"[^"]*"' \
+            | sed 's/"rfilename":"//;s/"$//' \
+            | grep -E '(^|/)(en-zh|zh-en|en-zh_hant|zh_hant-en)/' \
+            | sort || echo "枚举失败"
+          echo
+          echo "判据: 若某英中语向只有单个 vocab.*.spm(无 src/trg 分离),"
+          echo "则该语向可直接喂进 slimt, en->zh 主场景有解。"
 
       - name: G4.1 门禁判定
         if: always()
         run: |
-          echo "zh-en: ${{ steps.verify.outputs.rc_zhen }}"
-          echo "en-zh: ${{ steps.verify.outputs.rc_enzh }}"
+          echo "实验 1 (单句 zh-en):  ${{ steps.exp1.outcome }}"
+          echo "实验 2 (splitter):    ${{ steps.exp2.outcome }}"
+          echo "实验 3 (en-de 对照):  ${{ steps.control.outcome }}"
+          echo "探路 (英中单 vocab):  ${{ steps.probe.outcome }}"
           echo
-          echo "门禁标准(docs/13 §G4.1): 命令行能把 Hello world 译成中文,"
-          echo "且把一段中文译成英文 —— 译文正确性由人工看上面日志判定,"
-          echo "退出码 0 只是必要条件。"
+          echo "门禁标准(docs/13 §G4.1): 译文正确性由人工看上面日志判定,"
+          echo "退出码 0 只是必要条件 —— 上一轮三路全 rc=0 但两路是乱码。"
           echo
-          echo "若两路均失败且原因是模型档位不被支持, 则触发 docs/13 §1.2"
-          echo "bergamot-translator 回退路径。"
+          echo "本轮关键判据:"
+          echo "  实验 1 单句干净 => base 档在 slimt 上可用, 上层按句喂即可;"
+          echo "  实验 1 仍退化   => 与切分无关, 触发 §1.2 bergamot 回退;"
+          echo "  实验 3 若也退化 => 问题在引擎多句处理, 与 base 档无关。"
 
