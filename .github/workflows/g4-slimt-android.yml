@@ -84,6 +84,36 @@ jobs:
           cmake --version
           ninja --version
 
+      # ⚠️ 上一轮 configure 就挂在这: CMakeLists.txt:137 是
+      # find_package(xsimd REQUIRED), 而 xsimd **不是** vendored 依赖 ——
+      # 3rd-party/ 只有 gemmology/intgemm/ruy/sentencepiece 四个 submodule。
+      # G4.1 时它来自系统包 libxsimd-dev, 交叉编译时目标侧没有。
+      #
+      # xsimd 是 header-only, 交叉编译零成本: 只要 install 出
+      # xsimdConfig.cmake 供 find_package 走 CMAKE_PREFIX_PATH 找到即可,
+      # 不产生任何需要链接的二进制, 也不会进 libslimt.so 的 NEEDED 段。
+      #
+      # 版本对齐 noble 的 libxsimd-dev(13.x): gemmology 用的
+      # xsimd::neon64 与 arch_list API 在 13 系稳定; xsimd 12 及更早
+      # 的 arch 命名不同, 会让 Gemmology.cc:17 的 neon64 分支编不过。
+      - name: 准备 xsimd (header-only, 交叉编译无成本)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 13.0.0 \
+            https://github.com/xtensor-stack/xsimd.git "$RUNNER_TEMP/xsimd"
+          cd "$RUNNER_TEMP/xsimd"
+          # header-only: 这里只是为了生成 xsimdConfig.cmake, 不编任何代码,
+          # 故**不需要** toolchain —— 用宿主 cmake 装头文件即可。
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/xsimd-install" \
+            -DBUILD_TESTS=OFF >/dev/null
+          cmake --install build >/dev/null
+          echo "XSIMD_ROOT=$RUNNER_TEMP/xsimd-install" >> "$GITHUB_ENV"
+          echo "--- 装出的 config 文件(find_package 靠它):"
+          find "$RUNNER_TEMP/xsimd-install" -name 'xsimd*.cmake' -o -name 'xsimd*Config*.cmake' | head
+          echo "--- 确认 neon64 头文件在(Gemmology.cc:17 要用):"
+          find "$RUNNER_TEMP/xsimd-install" -path '*neon64*' -name '*.hpp' | head -3
+
       - name: 克隆 slimt
         run: |
           set -euo pipefail
@@ -107,11 +137,24 @@ jobs:
       #   USE_BUILTIN_SENTENCEPIECE  默认已是 ON, 显式写出防上游改默认值
       #   SLIMT_USE_INTERNAL_PCRE2   ⚠️ 名字是 SLIMT_ 前缀不是 SSPLIT_,
       #                              docs/13 §G4.2 写成 SSPLIT_ 是错的
-      #   WITH_BLAS=OFF              默认 ON, 关掉才会按 CMakeLists 第 19 行
-      #                              的注释 "Otherwise moves to ruy" 退到 ruy,
-      #                              避开 openblas 交叉编译
+      #   WITH_BLAS=OFF              避开 openblas 交叉编译。
+      #   WITH_RUY=ON                ⚠️ 必须显式开 —— CMakeLists.txt:19 的注释
+      #                              "Use BLAS. Otherwise moves to ruy" 描述的是
+      #                              **源码**行为(TensorOps.cc:22 在
+      #                              !SLIMT_HAS_BLAS 时 #include "ruy/ruy.h",
+      #                              :396 的 #else 用 ruy 实现 matrix_multiply),
+      #                              但 CMake 侧 WITH_BLAS 与 WITH_RUY 是两个
+      #                              **完全独立**的 option, 关掉 BLAS 不会自动
+      #                              置 WITH_RUY=ON。而 3rd-party/CMakeLists.txt
+      #                              只在 WITH_RUY 时 add_subdirectory(ruy),
+      #                              CMakeLists.txt:131-134 也只在此时链接 ruy。
+      #                              上一轮只关 BLAS 没开 RUY, 等于两个后端都缺。
       #   BUILD_SHARED=ON            我们要的就是 libslimt.so
       #   WITH_TESTS=OFF             默认 OFF, 交叉编译跑不了测试
+      #
+      # NEON 侧不需要 G4.1 那样的多档手工对齐: Gemmology.cc:17 只声明
+      # arch_list<neon64> 单档, 第 77-88 行也只实例化 neon64, 两处口径一致
+      # (x86 侧是 #elif 级联声明三档但 #ifdef 各自独立, 才要三个开关一起开)。
       - name: 配置交叉编译 (全内置依赖)
         id: configure
         continue-on-error: true
@@ -123,15 +166,24 @@ jobs:
             -DANDROID_ABI="$ANDROID_ABI" \
             -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$XSIMD_ROOT" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DWITH_GEMMOLOGY=ON \
             -DUSE_NEON=ON \
             -DUSE_BUILTIN_SENTENCEPIECE=ON \
             -DSLIMT_USE_INTERNAL_PCRE2=ON \
             -DWITH_BLAS=OFF \
+            -DWITH_RUY=ON \
             -DBUILD_SHARED=ON \
             -DBUILD_STATIC=ON \
             -DWITH_TESTS=OFF 2>&1 | tee "$RUNNER_TEMP/configure.log"
-          echo "--- configure 退出码: ${PIPESTATUS[0]}"
+          rc="${PIPESTATUS[0]}"
+          echo "--- configure 退出码: $rc"
+          echo
+          echo "--- CMake Error 摘要(便于下一轮定位):"
+          grep -nE 'CMake Error|Could NOT find|Configuring incomplete' \
+            "$RUNNER_TEMP/configure.log" | head -20 || echo "(无错误)"
+          exit "$rc"
 
       - name: 编译 libslimt.so
         id: build
@@ -207,11 +259,16 @@ jobs:
           if [ "${{ steps.verify.outcome }}" = "success" ]; then
             echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
           else
-            echo "=> G4.2 未通过。按 docs/13 §G4.2 的备选路径逐个换:"
-            echo "   1. WITH_GEMMOLOGY=OFF + WITH_RUY=ON  (换矩阵乘后端)"
-            echo "   2. USE_NEON=OFF                      (退纯标量, 先求编通)"
+            echo "=> G4.2 未通过。备选路径(已按本轮已排除项更新):"
+            echo "   1. WITH_GEMMOLOGY=OFF  (int8 也交给 ruy, 放弃 gemmology;"
+            echo "      QMM.cc:18 的 SLIMT_HAS_RUY 分支有 Ruy.inl.cc 实现,"
+            echo "      代价是 int8 矩阵乘性能可能低于 gemmology)"
+            echo "   2. xsimd 换 11.x/12.x  (若报 neon64/arch_list API 不匹配)"
             echo "   3. ANDROID_PLATFORM 抬到 android-30  (排除 API level 缺符号)"
             echo "   4. 上述都不行 -> 走 §1.2 bergamot-translator 回退"
+            echo
+            echo "本轮已排除: 「WITH_BLAS=OFF 自动退 ruy」是错的(注释描述源码"
+            echo "行为, CMake 两开关独立), 已显式补 WITH_RUY=ON。"
             echo
             echo "本轮错误已在「编译 libslimt.so」步骤末尾摘出首 30 条。"
           fi
