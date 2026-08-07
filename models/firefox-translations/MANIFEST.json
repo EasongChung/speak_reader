@@ -1,0 +1,129 @@
+{
+  "$comment": [
+    "G4 离线翻译模型分发清单。仓库内**不存**模型二进制(共约 131 MB) ——",
+    "GitHub LFS 免费额度存储/流量各 1 GB, 131 MB 会占去 12.8% 存储, 且每次",
+    "clone 消耗约 131 MB 流量(月配额仅够约 7 次)。额度耗尽时 GitHub 会**停用**",
+    "该仓库的 LFS 读写而非自动计费, 届时 clone 会在 checkout 阶段直接失败 ——",
+    "把模型放 LFS 会让「下载兜底」本身成为单点故障, 与入库初衷相反。",
+    "故改为: 仓库存清单 + 校验脚本, 二进制走 自有服务器 / GitHub Release 双源, 上游为最终回退。",
+    "",
+    "校验口径: sha256 一律为**解压后**文件的哈希, 三个源通用。",
+    "sha256_gz 仅对**自有源**(bonsai / release)的压缩包有效 —— 上游的 .gz 是",
+    "其自行压缩的产物, 字节与我方不同(gzip 时间戳/级别差异), 但解压后内容一致。"
+  ],
+  "name": "firefox-translations",
+  "version": 1,
+  "license": "MPL-2.0",
+  "license_url": "https://www.mozilla.org/MPL/2.0/",
+  "upstream_repo": "https://github.com/mozilla/firefox-translations-models",
+  "sources": [
+    {
+      "id": "bonsai",
+      "priority": 1,
+      "comment": "自有服务器, 首选。目录结构与本清单的 path 字段一一对应。",
+      "url_template": "https://jiaguwengarm.easong.dpdns.org/bonsai/speak_reader/models/firefox-translations/{path}.gz",
+      "verify_with": "sha256_gz"
+    },
+    {
+      "id": "release",
+      "priority": 2,
+      "comment": "GitHub Release 附件(不计入 LFS 配额, 单文件上限 2 GB)。附件是扁平命名空间, 故用 name 而非 path; 六个文件名本身已含语向标识(zhen/enzh), 无冲突。",
+      "url_template": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/{name}.gz",
+      "verify_with": "sha256_gz"
+    },
+    {
+      "id": "upstream",
+      "priority": 3,
+      "comment": "上游权威出处, 最终回退。⚠️ 两个语向来源不同, 故 URL 逐文件写在 files[].upstream_url, 不用模板。上游 .gz 的字节哈希与我方不同, 只能按解压后 sha256 校验。",
+      "verify_with": "sha256"
+    }
+  ],
+  "groups": [
+    {
+      "id": "zhen",
+      "dir": "zh-en",
+      "direction": "中 → 英",
+      "preset": "base",
+      "vocab_layout": "single",
+      "upstream": "Hugging Face 镜像 mukowaty/firefox-translations 的 zh-en/ 目录",
+      "files": [
+        {
+          "role": "model",
+          "name": "model.zhen.intgemm.alphas.bin",
+          "path": "zh-en/model.zhen.intgemm.alphas.bin",
+          "size": 59504955,
+          "size_gz": 44308692,
+          "sha256": "3535442962ec8f4a553cc19b206befcac689ee9cddaea44fa91e21527fc30ac2",
+          "sha256_gz": "b3b6854d83dcab30d472b1a64f882eb205b12297f23380a01b167a8b401786f7",
+          "upstream_url": "https://huggingface.co/mukowaty/firefox-translations/resolve/main/zh-en/model.zhen.intgemm.alphas.bin.gz"
+        },
+        {
+          "role": "vocabulary",
+          "name": "vocab.zhen.spm",
+          "path": "zh-en/vocab.zhen.spm",
+          "size": 1359697,
+          "size_gz": 732371,
+          "sha256": "dff594318ab7d8b7b60b844ab98ebe6b932ae8045fab15235404c787715965b3",
+          "sha256_gz": "42e9a37610cf75642e8e00384b1230748c3b0feaa71998d4e93eecd6aab811ac",
+          "upstream_url": "https://huggingface.co/mukowaty/firefox-translations/resolve/main/zh-en/vocab.zhen.spm.gz"
+        },
+        {
+          "role": "shortlist",
+          "name": "lex.50.50.zhen.s2t.bin",
+          "path": "zh-en/lex.50.50.zhen.s2t.bin",
+          "size": 9220016,
+          "size_gz": 4716407,
+          "sha256": "cdcad3592dc2bc4676c34c4d37203f7649ee989195cf083cbb60f1ea011f976b",
+          "sha256_gz": "6da3fb757aa247166ee9290bbbc612a94706e21d2b67c4102e838526a796a86c",
+          "upstream_url": "https://huggingface.co/mukowaty/firefox-translations/resolve/main/zh-en/lex.50.50.zhen.s2t.bin.gz"
+        }
+      ]
+    },
+    {
+      "id": "enzh",
+      "dir": "en-zh",
+      "direction": "英 → 中",
+      "preset": "base",
+      "vocab_layout": "single",
+      "upstream": "Mozilla 官方 GCS 分发点 cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/",
+      "upstream_note": "⚠️ 刻意**不用** HF 镜像的 en-zh —— 那一版是 srcvocab/trgvocab 双词表, slimt 的 Package 只接受单个 vocabulary 字段(G4.1 实测)。GCS 这一版是单词表, 才是可用的。",
+      "files": [
+        {
+          "role": "model",
+          "name": "model.enzh.intgemm.alphas.bin",
+          "path": "en-zh/model.enzh.intgemm.alphas.bin",
+          "size": 59504955,
+          "size_gz": 41000511,
+          "sha256": "31ba296821cfffcf4713176ed6f331eb1faf3f8fe433f454a37e722b5f8c4b17",
+          "sha256_gz": "92b3d47fcd43232f4bbb044caf4f8af2898b9ed5ff8a332c30c684f49468ce44",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/model.enzh.intgemm.alphas.bin.gz"
+        },
+        {
+          "role": "vocabulary",
+          "name": "vocab.enzh.spm",
+          "path": "en-zh/vocab.enzh.spm",
+          "size": 1358432,
+          "size_gz": 732075,
+          "sha256": "1ffaf806d8a17446675e04c99472ea716f7519d2a53ff826a1df8fa9bbcdf941",
+          "sha256_gz": "580807dca93eba9b5d2e46480291e96bb8050c0529b6b5dcac7f8debe2a40efc",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/vocab.enzh.spm.gz"
+        },
+        {
+          "role": "shortlist",
+          "name": "lex.50.50.enzh.s2t.bin",
+          "path": "en-zh/lex.50.50.enzh.s2t.bin",
+          "size": 6298264,
+          "size_gz": 3385781,
+          "sha256": "06fbe7ddd8ca547d47a68c104c5a84577e44b29de935a0e4eb5957603d746ec3",
+          "sha256_gz": "636babed1467ec6a73ca26a1f801e60cc6fd00e29d368faaf6f0989a0576bcca",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/lex.50.50.enzh.s2t.bin.gz"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "files": 6,
+    "size": 137246319,
+    "size_gz": 94875837
+  }
+}

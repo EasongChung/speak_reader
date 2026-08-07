@@ -1,0 +1,14 @@
+# 模型权重不入库(合计约 131 MB, 压缩态约 91 MB)。
+#
+# 为何不用 Git LFS: GitHub 免费额度的 LFS 存储与流量各 1 GB, 而本组模型单次
+# 克隆就消耗约 91 MB 流量 —— 十来次克隆即超额, 超额会直接阻断 clone/push,
+# 且需付费才能恢复。改为「服务器分发 + 清单校验」: 仓库里只留 MANIFEST.json、
+# 校验和与下载脚本, 权重按需取。
+#
+# 取模型:  bash fetch_models.sh        (Linux/macOS/Git Bash)
+#          .\fetch_models.ps1          (Windows PowerShell)
+# 只校验:  VERIFY_ONLY=1 bash fetch_models.sh
+
+*.bin
+*.spm
+*.gz

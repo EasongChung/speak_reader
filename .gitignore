@@ -22,3 +22,7 @@ pubspec.lock
 
 # Tesseract 训练数据(由 CI 下载,不提交)
 *.traineddata
+
+# Python 缓存(CI 辅助脚本运行时产生)
+__pycache__/
+*.pyc

@@ -98,6 +98,7 @@ speak_reader/
 ├── pubspec.yaml
 ├── android/                     Android 工程与权限配置
 ├── .github/workflows/           云端打包配置
+├── models/                      离线翻译模型的清单与下载脚本(权重不入库,见第七节)
 └── lib/
     ├── main.dart                入口 + 主题
     ├── models/document.dart     文档数据模型
@@ -152,3 +153,39 @@ speak_reader/
   包名下,文件头部保留了 Apache-2.0 声明。它同时修正了上游一处缺陷:
   `drawWithListener` 在竖向滚动时将次轴偏移写死为 0,与实际绘页所用的居中偏移
   不一致,导致文档各页宽度不等时覆盖层水平错位。
+
+### Firefox Translations 离线翻译模型(MPL-2.0)
+
+离线翻译功能(G4)使用的 slimt 兼容模型,来自 **Mozilla Firefox Translations** 项目:
+
+- **来源**:
+  - 官方仓库(mozilla/firefox-translations-models,已归档):
+    https://github.com/mozilla/firefox-translations-models
+  - Hugging Face 镜像(mukowaty/firefox-translations,MPL-2.0):
+    https://huggingface.co/mukowaty/firefox-translations
+  - en-zh 模型另存于 Mozilla 官方 GCS 分发点
+- **许可**:Mozilla Public License 2.0(MPL-2.0),
+  详情见 https://www.mozilla.org/MPL/2.0/ ;模型不带额外限制
+- **本仓库位置**:`models/firefox-translations/`(两组:zh-en 与 en-zh)
+- **⚠️ 权重不入库**:该目录只有清单(`MANIFEST.json`)、校验和与下载脚本,
+  合计约 19 KB。模型本身 131 MB,按需下载:
+
+  ```bash
+  cd models/firefox-translations
+  bash fetch_models.sh      # 或 Windows: .\fetch_models.ps1
+  ```
+
+  脚本按「自有服务器 → GitHub Release → 上游」顺序回退,逐文件校验 SHA-256。
+  未走 Git LFS 是因为免费额度耗尽会**停用仓库的 LFS 读写**导致 clone 直接
+  失败,反而让下载兜底变成单点故障(详见该目录 README)。
+- **分发说明**:
+  - zh-en(`zhen`):中→英
+    - `model.zhen.intgemm.alphas.bin` / `vocab.zhen.spm` / `lex.50.50.zhen.s2t.bin`
+    - 源:HF 镜像 `zh-en/` 目录
+  - en-zh(`enzh`):英→中
+    - `model.enzh.intgemm.alphas.bin` / `vocab.enzh.spm` / `lex.50.50.enzh.s2t.bin`
+    - 源:Mozilla 官方 GCS 分发点(单词表档;HF 那版是双词表,slimt 不收)
+  - 所有文件与上游**逐字节一致**,未做任何改动;`model.*.bin` 为 intgemm
+    量化权重,体积约 59 MB/个
+- **再分发义务**:MPL-2.0 要求对修改后的文件提供源代码;本项目**未修改**
+  任何模型文件,故无此义务。自有分发点已随附 MPL-2.0 全文与出处声明

@@ -267,6 +267,7 @@ jobs:
             -DANDROID_ABI="$ANDROID_ABI" \
             -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_PREFIX_PATH="$XSIMD_ROOT" \
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DPCRE2_LIBRARIES="$PCRE2_ROOT/lib/libpcre2-8.a" \
@@ -343,6 +344,27 @@ jobs:
           JNI_SRC="$GITHUB_WORKSPACE/android/app/src/main/cpp/slimt_jni.cpp"
           test -f "$JNI_SRC" || { echo "JNI 源码缺失: $JNI_SRC"; exit 1; }
 
+          # ⚠️ 第 6 轮根因: 只给 -I<slimt 根> 和 -I<build 目录> 不够 ——
+          #   slimt/Vocabulary.hh:9 直接 include "sentencepiece_processor.h",
+          #   它在 3rd-party/sentencepiece/src/ 下, 属 slimt 的**私有** include
+          #   目录, 不在公共头搜索路径里。而 slimt 的公共头(Frontend.hh ->
+          #   Model.hh -> Vocabulary.hh)会把它拽进任何包含者的 TU。
+          #
+          # 手工维护 -I 清单是本项目已知的坑型(自己写的清单会随上游漂移而过期),
+          # 故改为从 CMake 导出的 compile_commands.json 里**抄** slimt 自己某个
+          # TU 的全部 -I/-isystem/-D, 与 slimt 本体逐字节同源。上游零改动。
+          CCJ="build-android/compile_commands.json"
+          test -f "$CCJ" || { echo "缺 $CCJ, 检查 CMAKE_EXPORT_COMPILE_COMMANDS"; exit 1; }
+          # 抽取脚本单独成文件而非内嵌 heredoc: heredoc 的终止符必须顶到列 0,
+          # 会直接破坏 YAML 块标量的缩进(本轮已踩), 且外置后可本地单测。
+          mapfile -t INCS < <(
+            python3 "$GITHUB_WORKSPACE/.github/scripts/extract_slimt_includes.py" "$CCJ"
+          )
+          [ "${#INCS[@]}" -gt 0 ] || { echo "未能从 $CCJ 抽出 include 口径"; exit 1; }
+          echo "--- 沿用 slimt 本体的 ${#INCS[@]} 个 include/define 参数:"
+          printf '%s\n' "${INCS[@]}"
+          echo
+
           # slimt 的静态库 + ruy 拆出的几十个 .a 全量收集。手工列不现实,
           # 且 ruy 的产物名随版本变动, find 收全比维护清单可靠。
           mapfile -t ARCHIVES < <(find build-android -name '*.a' -type f | sort)
@@ -362,8 +384,7 @@ jobs:
           #   (JNIEXPORT 本身已带 visibility("default"), 这里是双保险。)
           "$CXX" -shared -fPIC -O2 -std=c++20 \
             -fvisibility=default \
-            -I"$RUNNER_TEMP/slimt" \
-            -I"$RUNNER_TEMP/slimt/build-android" \
+            "${INCS[@]}" \
             -o build-android/libslimt_jni.so \
             "$JNI_SRC" \
             -Wl,--start-group "${ARCHIVES[@]}" -Wl,--end-group \
@@ -553,9 +574,21 @@ jobs:
             echo " · 第5轮: artifact 的 path 以 GITHUB_WORKSPACE 为基准(不是步骤"
             echo "          里 cd 的目录), 加上 if-no-files-found:warn 静默,"
             echo "          门禁出过假阳性 -> 已改 realpath 绝对路径 + error"
+            echo " · 第6轮: JNI 层只给 -I<slimt根> 与 -I<build目录> 不够 ——"
+            echo "          slimt/Vocabulary.hh:9 include 的"
+            echo "          sentencepiece_processor.h 在 3rd-party/sentencepiece/src/,"
+            echo "          属 slimt 私有 include 目录, 却被公共头链拽进 TU ->"
+            echo "          改为从 compile_commands.json 抄 slimt 本体 TU 的"
+            echo "          全部 -I/-isystem/-D, 不再手工维护清单"
             echo " · 探底轮: ANDROID_PLATFORM=21 编不过, 唯一根因是 Aligned.cc:51"
             echo "          的 aligned_alloc(C11, Bionic 从 API 28 才提供),"
             echo "          与 SIMD/后端选型无关 -> 已锁 28, 不要再往下试"
             echo
-            echo "本轮错误已在「编译 libslimt.so」步骤末尾摘出首 30 条。"
+            echo "本轮错误已在失败步骤末尾摘出首 30 条。"
+            echo
+            # ⚠️ 第 6 轮新增: 失败分支必须 exit 1。此前门禁只 echo 不退出,
+            # 于是 build_jni/verify 明明 failure、upload skipped, run 结论
+            # 仍是 success —— 「run 绿灯」与「门禁通过」脱钩, 等于第 5 轮
+            # 假阳性的变体(那次是 artifact 空, 这次是结论骗人)。
+            exit 1
           fi
