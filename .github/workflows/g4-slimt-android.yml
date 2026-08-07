@@ -26,34 +26,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
-    # ⚠️ android-28 已在第 5 轮通过(run 31179559220, artifact 5.8MB),
-    # 本轮加 android-21 探底: 21 = build.gradle:67 的 minSdk, 若能编通则
-    # 零兼容性代价; 编不通才需要决定是否抬 minSdk(会砍 Android 5.x 用户)。
-    #
-    # 28 留作对照组而非删掉: 若 21 失败而 28 也跟着失败, 说明是环境漂移
-    # (NDK/xsimd/pcre2 上游变动)而非 API level 问题, 免得误判。
-    # fail-fast: false —— 21 挂掉不能带走 28 的结论。
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: 'android-21'
-            role: '探底(= minSdk, 目标档)'
-          - platform: 'android-28'
-            role: '对照组(第 5 轮已通过)'
-
-    name: slimt-android (${{ matrix.platform }})
-
     env:
       # 与 android/app/build.gradle 的 ndkVersion 一致(第 43 行), 不可漂移:
       # 用别的版本编出来的 .so 在真机上可能因 libc++ ABI 差异崩。
       NDK_VERSION: '27.0.12077973'
       # abiFilters 只留 arm64-v8a(build.gradle 第 73 行), 故只编这一档。
       ANDROID_ABI: 'arm64-v8a'
-      # 由 matrix 注入。21 的已知风险: <sys/auxv.h> 的 getauxval 在
-      # API 18+ 才有(21 应当有), 但 ruy 的 CPU 特性探测与 xsimd 对老
-      # API level 支持不稳, 具体缺什么以本轮日志为准, 不预设结论。
-      ANDROID_PLATFORM: ${{ matrix.platform }}
+      # ⚠️ 锁定 28, 已探底确认这是 slimt 能编通的**最低档**, 不要改小。
+      #
+      # 探底结论(run 31180887218, matrix 同跑 21/28, fail-fast:false):
+      #   android-21 单一错误, 且全仓仅此一处 ——
+      #     slimt/Aligned.cc:51:10: error:
+      #       use of undeclared identifier 'aligned_alloc'
+      #   aligned_alloc 是 C11 函数, Android Bionic **从 API 28 才提供**。
+      #   同轮 28 档正常通过, 排除环境漂移。
+      #
+      # ⚠️ 修正此前的错误猜测: 最初选 28 的理由写的是「21 缺 getauxval 等
+      # NEON 运行时探测符号, ruy/xsimd 对老 API level 支持不稳」—— 这是错的。
+      # ruy / xsimd / gemmology / pcre2 / sentencepiece 在 21 上全部编过,
+      # 唯一障碍是一个内存分配 API 的可用性, 与 SIMD、与后端选型都无关。
+      #
+      # 已决定不改 slimt 源码(posix_memalign 替换虽仅 4 行且语义等价,
+      # 但会打破「上游零改动」)。minSdk 保持 21 不动, 离线翻译在
+      # G4.3 按 Build.VERSION.SDK_INT >= 28 做特性开关, 老机型走在线链路。
+      ANDROID_PLATFORM: 'android-28'
 
     steps:
       - name: 检出 G4 分支
@@ -373,9 +369,10 @@ jobs:
         if: steps.verify.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          # ⚠️ 必须带 platform 后缀: matrix 两个 job 同名会撞,
+          # 单档单 job, 不加后缀。若将来再开 matrix 同跑多个 platform,
+          # 必须补 -${{ matrix.platform }} 后缀: 同名 artifact 会撞,
           # 而 overwrite 默认 false, 后跑完的那个会直接失败。
-          name: libslimt-arm64-v8a-${{ matrix.platform }}
+          name: libslimt-arm64-v8a
           path: ${{ env.SO_PATH }}
           # ⚠️ 必须 error 不能 warn: 本 gate 的意义就是拿到可用产物,
           # 找不到文件时静默放过会让门禁出假阳性(第 4 轮就是这么过的)。
@@ -396,39 +393,27 @@ jobs:
           # ⚠️ 必须同时判 upload: 第 4 轮 verify 通过(.so 确实是 aarch64)但
           # artifact 为空(路径相对基准写错 + if-no-files-found:warn 静默),
           # 只判 verify 就出了假阳性。产物拿不到 = G4.3 无从下手 = 没通过。
-          echo "本档: ${{ matrix.platform }}  角色: ${{ matrix.role }}"
+          echo "编译档: $ANDROID_PLATFORM (已探底确认为 slimt 可编通的最低档)"
           echo
           if [ "${{ steps.verify.outcome }}" = "success" ] \
              && [ "${{ steps.upload.outcome }}" = "success" ]; then
-            echo "=> ${{ matrix.platform }} 编译通过, artifact 已上传。"
-            if [ "${{ matrix.platform }}" = "android-21" ]; then
-              echo "   探底成功: 21 == build.gradle:67 的 minSdk, 故**无需抬"
-              echo "   minSdk**, Android 5.0 起全部机型可用, 零兼容性代价。"
-              echo "   G4.3 应改用本档产物(而非 28 档)。"
-            else
-              echo "   对照组通过, 说明构建链路本身正常(NDK/xsimd/pcre2 未漂移)。"
-            fi
+            echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
+            echo
+            echo "   ⚠️ G4.3 必做两件事:"
+            echo "   1. strip 后再打包: 产物 22MB 中 17.7MB 是 .debug* 段,"
+            echo "      strip 后约 3.6MB。用 NDK 的 llvm-strip --strip-debug。"
+            echo "   2. 离线翻译需按 Build.VERSION.SDK_INT >= 28 做特性开关:"
+            echo "      本库编译档 28 高于项目 minSdk 21(build.gradle:67),"
+            echo "      在 21~27 机型上 loadLibrary 会失败, 必须降级到在线翻译。"
           else
-            if [ "${{ matrix.platform }}" = "android-21" ]; then
-              echo "=> android-21 探底失败。若 28 档同时通过, 则确属 API level"
-              echo "   问题而非环境漂移, 此时需你决定:"
-              echo "     a) 抬 minSdk 到 28  —— 砍掉 Android 5.0~8.1 机型"
-              echo "     b) 逐档二分 22/24/26 找最低可用档"
-              echo "     c) 保留 minSdk 21, 但离线翻译功能仅在 28+ 开放"
-              echo "        (运行时按 Build.VERSION.SDK_INT 判定并降级到在线翻译)"
-              echo "   推荐 c: 不牺牲任何现有用户, 老机型仍走原在线链路。"
-              echo "   具体缺什么符号见本 job「编译 libslimt.so」末尾的错误摘要。"
-              echo
-            fi
-            echo "=> 未通过。备选路径(已按累计已排除项更新):"
+            echo "=> G4.2 未通过。备选路径(已按累计已排除项更新):"
             echo "   1. 换回 gemmology 后端: WITH_GEMMOLOGY=ON + WITH_RUY=OFF"
             echo "      + WITH_BLAS=ON, 并为 arm64 交叉编 OpenBLAS。这与上游"
             echo "      CI(main.yml:212) 同构, 是唯一被上游验证过的组合,"
             echo "      代价是多编一个 OpenBLAS(当初正为省这一步才选 ruy)"
-            echo "   2. ANDROID_PLATFORM 抬到 android-30  (排除 API level 缺符号)"
-            echo "   3. ruy 若在 aarch64 编不过, 试固定 ruy 到更早 tag"
+            echo "   2. ruy 若在 aarch64 编不过, 试固定 ruy 到更早 tag"
             echo "      (它是 slimt 的 submodule, 可单独 checkout)"
-            echo "   4. 上述都不行 -> 走 §1.2 bergamot-translator 回退"
+            echo "   3. 上述都不行 -> 走 §1.2 bergamot-translator 回退"
             echo
             echo "累计已排除(每轮一条根因, 不重复踩):"
             echo " · 第1轮: xsimd 不是 vendored 依赖 -> 已预装 header-only 包"
@@ -441,6 +426,12 @@ jobs:
             echo " · 第4轮: int8 后端三选一, ruy 与 gemmology 同开必然"
             echo "          QMM.cc kProvider 重定义(三个 #ifdef 在同一 namespace"
             echo "          各定义一次) -> 关 GEMMOLOGY, fp32+int8 统一走 ruy"
+            echo " · 第5轮: artifact 的 path 以 GITHUB_WORKSPACE 为基准(不是步骤"
+            echo "          里 cd 的目录), 加上 if-no-files-found:warn 静默,"
+            echo "          门禁出过假阳性 -> 已改 realpath 绝对路径 + error"
+            echo " · 探底轮: ANDROID_PLATFORM=21 编不过, 唯一根因是 Aligned.cc:51"
+            echo "          的 aligned_alloc(C11, Bionic 从 API 28 才提供),"
+            echo "          与 SIMD/后端选型无关 -> 已锁 28, 不要再往下试"
             echo
             echo "本轮错误已在「编译 libslimt.so」步骤末尾摘出首 30 条。"
           fi
