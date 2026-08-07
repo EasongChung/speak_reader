@@ -1,10 +1,14 @@
 package com.example.speak_reader
 
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import io.endigo.plugins.pdfviewflutter.PDFViewFactory
@@ -21,6 +25,16 @@ class MainActivity : FlutterActivity() {
 
     // [G2] PDF 平台视图注册名, 与 lib/vendor/flutter_pdfview 中的 _kViewType 一致
     private val pdfViewType = "speak_reader/pdfview"
+
+    // [G4.3] 离线翻译通道: 原生库可用性判定 + SAF 模型导入 + 翻译
+    private val offlineTranslateChannel = "com.example.speak_reader/offline_translate"
+
+    // [G4.3] SAF 目录选择的请求码。用 onActivityResult 而非 ActivityResultContracts:
+    // FlutterActivity 不是 ComponentActivity 的子类, 拿不到 registerForActivityResult。
+    private val pickModelDirRequest = 0x51A1
+
+    /** [G4.3] 目录选择结果回调; 选择器打开期间非 null。 */
+    private var pendingDirResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -99,6 +113,186 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // [G4.3] 离线翻译通道。可用性判定在 SlimtBridge 内, 与 loadLibrary 同址。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, offlineTranslateChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // 双条件: SDK_INT >= 28 且 loadLibrary 成功。详见 SlimtBridge。
+                    "isOfflineAvailable" -> result.success(SlimtBridge.isAvailable())
+
+                    // 不可用原因, 供设置页副标题展示; 可用时为 null。
+                    "unavailableReason" -> result.success(
+                        if (SlimtBridge.isAvailable()) {
+                            null
+                        } else {
+                            SlimtBridge.unavailableReason()
+                                ?: "当前系统不支持离线翻译（需 Android 9 及以上）"
+                        }
+                    )
+
+                    // 系统 API 级别, 供 UI 判断是否置灰开关。
+                    "sdkInt" -> result.success(Build.VERSION.SDK_INT)
+
+                    // 打开 SAF 目录选择器。结果经 onActivityResult 异步回传。
+                    "pickModelDirectory" -> {
+                        if (pendingDirResult != null) {
+                            result.error("busy", "目录选择器已打开", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            pendingDirResult = result
+                            startActivityForResult(
+                                Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
+                                pickModelDirRequest,
+                            )
+                        } catch (e: Exception) {
+                            pendingDirResult = null
+                            result.error("pick_failed", e.message, null)
+                        }
+                    }
+
+                    // 扫描已授权目录中的模型组。
+                    "scanModels" -> {
+                        val uriString = call.argument<String>("treeUri")
+                        if (uriString.isNullOrEmpty()) {
+                            result.error("bad_args", "treeUri is required", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            result.success(ModelImporter.scan(this, Uri.parse(uriString)))
+                        } catch (e: Exception) {
+                            result.error("scan_failed", e.message, null)
+                        }
+                    }
+
+                    // 把模型组复制进私有目录, 返回可加载的真实路径。
+                    "importModel" -> {
+                        val uriString = call.argument<String>("treeUri")
+                        val groupId = call.argument<String>("groupId")
+                        if (uriString.isNullOrEmpty() || groupId.isNullOrEmpty()) {
+                            result.error("bad_args", "treeUri 与 groupId 均必填", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            result.success(
+                                ModelImporter.import(this, Uri.parse(uriString), groupId)
+                            )
+                        } catch (e: Exception) {
+                            result.error("import_failed", e.message, null)
+                        }
+                    }
+
+                    "importedGroups" -> result.success(ModelImporter.importedGroups(this))
+
+                    "deleteGroup" -> {
+                        val groupId = call.argument<String>("groupId")
+                        if (groupId.isNullOrEmpty()) {
+                            result.error("bad_args", "groupId is required", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            // 先卸载再删文件: 反过来会让 mmap 指向已删除的 inode。
+                            SlimtBridge.unload(groupId)
+                            ModelImporter.deleteGroup(this, groupId)
+                            result.success(null)
+                        } catch (e: Exception) {
+                            result.error("delete_failed", e.message, null)
+                        }
+                    }
+
+                    "loadModel" -> {
+                        val id = call.argument<String>("id")
+                        val modelPath = call.argument<String>("modelPath")
+                        val vocabularyPath = call.argument<String>("vocabularyPath")
+                        val shortlistPath = call.argument<String>("shortlistPath") ?: ""
+                        val ssplitPath = call.argument<String>("ssplitPath") ?: ""
+                        val preset = call.argument<String>("preset") ?: "base"
+                        if (id.isNullOrEmpty() || modelPath.isNullOrEmpty() ||
+                            vocabularyPath.isNullOrEmpty()
+                        ) {
+                            result.error("bad_args", "id/modelPath/vocabularyPath 均必填", null)
+                            return@setMethodCallHandler
+                        }
+                        if (!SlimtBridge.isAvailable()) {
+                            result.error("unavailable", "离线翻译不可用", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            SlimtBridge.load(
+                                id, modelPath, vocabularyPath,
+                                shortlistPath, ssplitPath, preset,
+                            )
+                            result.success(null)
+                        } catch (e: Throwable) {
+                            result.error("load_failed", e.message, null)
+                        }
+                    }
+
+                    "translate" -> {
+                        val id = call.argument<String>("id")
+                        val text = call.argument<String>("text")
+                        if (id.isNullOrEmpty() || text == null) {
+                            result.error("bad_args", "id 与 text 均必填", null)
+                            return@setMethodCallHandler
+                        }
+                        if (!SlimtBridge.isAvailable()) {
+                            result.error("unavailable", "离线翻译不可用", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            result.success(SlimtBridge.translate(id, text))
+                        } catch (e: Throwable) {
+                            // Throwable 而非 Exception: JNI 抛的 UnsatisfiedLinkError
+                            // 是 Error 不是 Exception, 漏了会直接崩掉进程。
+                            result.error("translate_failed", e.message, null)
+                        }
+                    }
+
+                    "loadedIds" -> result.success(
+                        if (SlimtBridge.isAvailable()) SlimtBridge.loadedIds() else ""
+                    )
+
+                    "unloadAll" -> {
+                        if (SlimtBridge.isAvailable()) SlimtBridge.unloadAll()
+                        result.success(null)
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /**
+     * [G4.3] 接收 SAF 目录选择结果。
+     *
+     * 必须调 [takePersistableUriPermission], 否则授权在进程重启后失效,
+     * 下次扫描会静默返回空列表 —— 表现为「上次选好的目录突然没模型了」。
+     */
+    @Deprecated("FlutterActivity 非 ComponentActivity, 无法用 ActivityResultContracts")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != pickModelDirRequest) return
+
+        val callback = pendingDirResult ?: return
+        pendingDirResult = null
+
+        val uri = data?.data
+        if (resultCode != Activity.RESULT_OK || uri == null) {
+            // 用户取消不是错误, 返回 null 让 Dart 侧安静收场。
+            callback.success(null)
+            return
+        }
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+            callback.success(uri.toString())
+        } catch (e: Exception) {
+            callback.error("persist_failed", e.message, null)
+        }
     }
 
     /// 用系统 PdfRenderer 把指定页渲染成 PNG 字节流; 页不存在返回 null。

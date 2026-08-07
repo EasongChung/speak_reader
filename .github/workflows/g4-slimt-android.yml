@@ -1,6 +1,9 @@
-name: G4.2 slimt Android arm64 交叉编译 (PoC)
+name: G4.2/G4.3 slimt Android arm64 交叉编译 + JNI 链接 (PoC)
 
-# [G4.2] 用 Android NDK 把 slimt 交叉编译成 arm64-v8a 的 libslimt.so。
+# [G4.2] 用 Android NDK 把 slimt 交叉编译成 arm64-v8a 的静态/共享库。
+# [G4.3] 再把 android/app/src/main/cpp/slimt_jni.cpp 与 slimt 静态库链成
+#        单个 libslimt_jni.so —— 这才是最终交付进 jniLibs 的产物。
+#        单 .so 的理由见「编译 libslimt_jni.so」步骤的注释(方案 A)。
 #
 # 前置: G4.1 已通过(run 31172293077) —— 上游未改动的 slimt 能正确加载
 # 中英 base 模型双向翻译:
@@ -19,6 +22,8 @@ on:
     branches: [g4-offline-translate]
     paths:
       - '.github/workflows/g4-slimt-android.yml'
+      # [G4.3] JNI 源码也要触发: 它由本 workflow 编译, 改了不重编等于没改。
+      - 'android/app/src/main/cpp/**'
   workflow_dispatch:
 
 jobs:
@@ -305,6 +310,93 @@ jobs:
             "$RUNNER_TEMP/build.log" | head -30 || echo "(无错误行)"
           exit "$rc"
 
+      # ============================================================
+      # [G4.3] 把 JNI 适配层与 slimt 静态库链成单个 libslimt_jni.so
+      # ============================================================
+      # ⚠️ 为什么是**单** .so (docs/13 §G4.3 方案 A, 2026-08-07 用户确认):
+      # 上一步产出的 libslimt.so 的 NEEDED 段没有 libc++_shared.so, 即 STL
+      # 静态链入。若 JNI 层另编一个 .so 去链它, JNI 层会带自己那份静态 STL,
+      # 而 slimt 的对外 API 重度使用 std::string/std::vector/std::shared_ptr
+      # (Blocking::translate 签名), 这些类型跨 .so 边界传递时两份静态 STL
+      # 各有独立 type_info/异常表/全局状态, 属未定义行为。把 JNI 边界改成
+      # 纯 C **救不了** —— 问题在 JNI 层与 libslimt 之间, 不在与 Java 之间。
+      #
+      # ⚠️ 为什么不用 add_subdirectory 把 slimt 并进一个 CMake 工程:
+      # slimt/CMakeLists.txt:111-112 的 include 目录写的是 ${CMAKE_SOURCE_DIR}
+      # 与 ${CMAKE_BINARY_DIR}(**全局根**, 不是 CURRENT_*)。一旦 slimt 变成
+      # 子目录, 这两个变量会指向我们的工程根, slimt 自己的 .cc 就找不到
+      # slimt/Frontend.hh 和生成的 Export.hh。绕开它要改上游, 违反零改动。
+      # 故保持 slimt 顶层独立编译, 这里单独调 clang++ 链接。
+      - name: 编译 libslimt_jni.so (JNI 适配层 + slimt 静态库)
+        id: build_jni
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          LLVM_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CXX="$LLVM_BIN/aarch64-linux-android${ANDROID_PLATFORM#android-}-clang++"
+          test -x "$CXX" || { echo "找不到编译器: $CXX"; ls "$LLVM_BIN" | head -20; exit 1; }
+          echo "--- 编译器: $CXX"
+          "$CXX" --version | head -2
+          echo
+
+          JNI_SRC="$GITHUB_WORKSPACE/android/app/src/main/cpp/slimt_jni.cpp"
+          test -f "$JNI_SRC" || { echo "JNI 源码缺失: $JNI_SRC"; exit 1; }
+
+          # slimt 的静态库 + ruy 拆出的几十个 .a 全量收集。手工列不现实,
+          # 且 ruy 的产物名随版本变动, find 收全比维护清单可靠。
+          mapfile -t ARCHIVES < <(find build-android -name '*.a' -type f | sort)
+          echo "--- 收集到 ${#ARCHIVES[@]} 个静态库:"
+          printf '%s\n' "${ARCHIVES[@]}" | head -20
+          [ "${#ARCHIVES[@]}" -gt 0 ] || { echo "未找到任何 .a, 检查 BUILD_STATIC"; exit 1; }
+          echo
+
+          # -static-libstdc++: 与 G4.2 的 libslimt.so 口径一致, STL 静态链入,
+          #   不引入 libc++_shared.so 运行时依赖。
+          # --start-group/--end-group: slimt 与 ruy 之间存在循环符号引用,
+          #   单遍链接会漏解析。
+          # -Wl,--no-undefined: 让缺符号在**链接期**就报错, 而不是拖到真机
+          #   dlopen 时才 UnsatisfiedLinkError —— 那时排查成本高得多。
+          # -fvisibility=default 仅作用于本文件: slimt 顶层 CMakeLists.txt:10
+          #   设了 visibility hidden, 但 JNI 入口必须导出才能被 dlsym 找到。
+          #   (JNIEXPORT 本身已带 visibility("default"), 这里是双保险。)
+          "$CXX" -shared -fPIC -O2 -std=c++20 \
+            -fvisibility=default \
+            -I"$RUNNER_TEMP/slimt" \
+            -I"$RUNNER_TEMP/slimt/build-android" \
+            -o build-android/libslimt_jni.so \
+            "$JNI_SRC" \
+            -Wl,--start-group "${ARCHIVES[@]}" -Wl,--end-group \
+            -static-libstdc++ \
+            -Wl,--no-undefined \
+            -llog -lm -ldl 2>&1 | tee "$RUNNER_TEMP/jni.log"
+          rc="${PIPESTATUS[0]}"
+          echo "--- JNI 链接退出码: $rc"
+          echo
+          echo "--- 首批错误:"
+          grep -nE 'error:|fatal error:|undefined symbol|undefined reference' \
+            "$RUNNER_TEMP/jni.log" | head -30 || echo "(无错误行)"
+          exit "$rc"
+
+      # strip 是 docs/13 §G4.3 结转的第 1 条前置要求: 未 strip 的 libslimt.so
+      # 有 22MB, 其中约 17.7MB 是 .debug* 段。此处顺带把实测值打进日志回填文档。
+      - name: strip 调试段
+        id: strip
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          LLVM_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SO="build-android/libslimt_jni.so"
+          test -f "$SO" || { echo "产物缺失: $SO"; exit 1; }
+          BEFORE="$(stat -c%s "$SO")"
+          "$LLVM_BIN/llvm-strip" --strip-debug "$SO"
+          AFTER="$(stat -c%s "$SO")"
+          echo "=== strip 前后体积(用于回填 docs/13 §G4.3):"
+          echo "  strip 前: $BEFORE 字节 ($((BEFORE / 1024 / 1024)) MB)"
+          echo "  strip 后: $AFTER 字节 ($((AFTER / 1024 / 1024)) MB)"
+          echo "  减少:     $((BEFORE - AFTER)) 字节"
+
       # 通过标准(docs/13 §G4.2): file 确认是 ELF 64-bit LSB shared object,
       # ARM aarch64。只看「编译成功」不够 —— 要防 toolchain 没生效编成了 x86_64。
       - name: 验证产物架构
@@ -315,10 +407,12 @@ jobs:
           cd "$RUNNER_TEMP/slimt"
           echo "--- 所有 libslimt* 产物:"
           find build-android -name 'libslimt*' -print 2>/dev/null || true
-          SO="$(find build-android -name 'libslimt.so' -type f | head -1)"
+          # [G4.3] 交付物改为 libslimt_jni.so(方案 A 单 .so)。libslimt.so
+          # 仍会产出但不再打包 —— 它是 G4.2 的中间产物, JNI 层链的是 .a。
+          SO="$(find build-android -name 'libslimt_jni.so' -type f | head -1)"
           if [ -z "$SO" ]; then
-            echo "未找到 libslimt.so, 检查是否只产出了静态库:"
-            find build-android -name '*.a' | head -10
+            echo "未找到 libslimt_jni.so, 检查 JNI 链接步骤是否成功:"
+            find build-android -name 'libslimt*' | head -10
             exit 1
           fi
           echo
@@ -348,13 +442,35 @@ jobs:
               || echo "(readelf 也无输出)"
           fi
           echo
-          echo "=== 导出符号抽样(确认 slimt API 在):"
+          # [G4.3] JNI 入口符号必须**逐个**存在, 且必须是硬门禁 ——
+          # 缺一个都会在真机上表现为 UnsatisfiedLinkError: No implementation
+          # found for ...。这是最容易出错的一环: 包名 com.example.speak_reader
+          # 含下划线, JNI 命名规则要求转义成 _1(speak_1reader), 写成
+          # speak_reader 会静默找不到符号, 编译链接全过、装上才崩。
+          echo "=== JNI 入口符号(硬门禁, 缺一即失败):"
           if [ -x "$LLVM_BIN/llvm-nm" ]; then
-            "$LLVM_BIN/llvm-nm" --dynamic --defined-only "$SO" 2>&1 \
-              | grep -iE 'slimt' | head -15 || echo "(未抽到 slimt 符号)"
+            NM="$LLVM_BIN/llvm-nm"
           else
-            nm -D --defined-only "$SO" 2>&1 | grep -iE 'slimt' | head -15 \
-              || echo "(nm 未抽到)"
+            NM="nm"
+            echo "(llvm-nm 不在 $LLVM_BIN, 回退用 nm)"
+          fi
+          SYMS="$("$NM" --dynamic --defined-only "$SO" 2>&1 || true)"
+          MISSING=0
+          for fn in nativeLoad nativeTranslate nativeUnload nativeUnloadAll \
+                    nativeLoadedIds; do
+            EXPECT="Java_com_example_speak_1reader_SlimtBridge_$fn"
+            if printf '%s' "$SYMS" | grep -q "$EXPECT"; then
+              echo "  [ok] $EXPECT"
+            else
+              echo "  [FAIL] 缺符号 $EXPECT"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo
+            echo "实际导出的 Java_* 符号(对照排查转义是否写错):"
+            printf '%s' "$SYMS" | grep -E 'Java_' || echo "(一个都没有)"
+            exit 1
           fi
           echo
           # ⚠️ 必须写**绝对路径**: upload-artifact 的 path 相对
@@ -372,39 +488,47 @@ jobs:
           # 单档单 job, 不加后缀。若将来再开 matrix 同跑多个 platform,
           # 必须补 -${{ matrix.platform }} 后缀: 同名 artifact 会撞,
           # 而 overwrite 默认 false, 后跑完的那个会直接失败。
-          name: libslimt-arm64-v8a
+          name: libslimt-jni-arm64-v8a
           path: ${{ env.SO_PATH }}
           # ⚠️ 必须 error 不能 warn: 本 gate 的意义就是拿到可用产物,
           # 找不到文件时静默放过会让门禁出假阳性(第 4 轮就是这么过的)。
           if-no-files-found: error
           retention-days: 14
 
-      - name: G4.2 门禁判定
+      - name: G4.3 门禁判定
         if: always()
         run: |
           echo "configure:  ${{ steps.configure.outcome }}"
           echo "build:      ${{ steps.build.outcome }}"
+          echo "build_jni:  ${{ steps.build_jni.outcome }}"
+          echo "strip:      ${{ steps.strip.outcome }}"
           echo "verify:     ${{ steps.verify.outcome }}"
           echo "upload:     ${{ steps.upload.outcome }}"
           echo
-          echo "门禁标准(docs/13 §G4.2): 产出 libslimt.so 且 file 确认为"
-          echo "ELF 64-bit LSB shared object, ARM aarch64, 并成功上传 artifact。"
+          echo "门禁标准(docs/13 §G4.3): 产出 libslimt_jni.so, file 确认为"
+          echo "ELF 64-bit LSB shared object / ARM aarch64, 五个 JNI 入口符号"
+          echo "齐备, NEEDED 不含 libc++_shared.so, 并成功上传 artifact。"
           echo
           # ⚠️ 必须同时判 upload: 第 4 轮 verify 通过(.so 确实是 aarch64)但
           # artifact 为空(路径相对基准写错 + if-no-files-found:warn 静默),
-          # 只判 verify 就出了假阳性。产物拿不到 = G4.3 无从下手 = 没通过。
+          # 只判 verify 就出了假阳性。产物拿不到 = 下一步无从下手 = 没通过。
           echo "编译档: $ANDROID_PLATFORM (已探底确认为 slimt 可编通的最低档)"
           echo
           if [ "${{ steps.verify.outcome }}" = "success" ] \
              && [ "${{ steps.upload.outcome }}" = "success" ]; then
-            echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
+            echo "=> 云编译通过。取 artifact libslimt-jni-arm64-v8a, 放到"
+            echo "   android/app/src/main/jniLibs/arm64-v8a/libslimt_jni.so,"
+            echo "   再本地 flutter build 装真机验证。"
             echo
-            echo "   ⚠️ G4.3 必做两件事:"
-            echo "   1. strip 后再打包: 产物 22MB 中 17.7MB 是 .debug* 段,"
-            echo "      strip 后约 3.6MB。用 NDK 的 llvm-strip --strip-debug。"
-            echo "   2. 离线翻译需按 Build.VERSION.SDK_INT >= 28 做特性开关:"
-            echo "      本库编译档 28 高于项目 minSdk 21(build.gradle:67),"
-            echo "      在 21~27 机型上 loadLibrary 会失败, 必须降级到在线翻译。"
+            echo "   ⚠️ 真机验证要点:"
+            echo "   1. 这是 ruy 后端的**首次真实推理**。模型是 intgemm 量化"
+            echo "      权重, 而本库编的是 WITH_RUY=ON —— 该组合上游 CI 从未"
+            echo "      跑过(上游用 OpenBLAS+gemmology, main.yml:212)。若译文"
+            echo "      乱码, 根因属 G4.4 已知风险项, 不是 JNI 写错。"
+            echo "   2. Android 9 以下机型应静默走在线链路(SlimtBridge 判定),"
+            echo "      设置页开关置灰并显示「需 Android 9 及以上」。"
+            echo "   3. 模型经 SAF 选目录导入, 会复制进 app 私有目录 ——"
+            echo "      slimt 用 mmap 读真实路径, 不认 content:// URI。"
           else
             echo "=> G4.2 未通过。备选路径(已按累计已排除项更新):"
             echo "   1. 换回 gemmology 后端: WITH_GEMMOLOGY=ON + WITH_RUY=OFF"
