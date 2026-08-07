@@ -491,7 +491,17 @@ jobs:
           for fn in nativeLoad nativeTranslate nativeUnload nativeUnloadAll \
                     nativeLoadedIds; do
             EXPECT="Java_com_example_speak_1reader_SlimtBridge_$fn"
-            if printf '%s' "$SYMS" | grep -q "$EXPECT"; then
+            # ⚠️ 必须用 case 而非 `printf | grep -q`: grep -q 命中即退出并
+            # 关闭管道, printf 仍在写 -> SIGPIPE -> 返回 141, 而 set -o
+            # pipefail 取管道最后一个非零码, 于是**命中反被判失败**。
+            # 第 7 轮实测: 五个符号全部导出(日志尾部 nm 输出可见), 却全报
+            # [FAIL] 并伴随 "printf: write error: Broken pipe"。
+            # case 是 shell 内建的模式匹配, 无子进程无管道, 不受影响。
+            case "$SYMS" in
+              *"$EXPECT"*) HIT=1 ;;
+              *)           HIT=0 ;;
+            esac
+            if [ "$HIT" = 1 ]; then
               echo "  [ok] $EXPECT"
             else
               echo "  [FAIL] 缺符号 $EXPECT"
@@ -591,6 +601,8 @@ jobs:
             echo "          属 slimt 私有 include 目录, 却被公共头链拽进 TU ->"
             echo "          改为从 compile_commands.json 抄 slimt 本体 TU 的"
             echo "          全部 -I/-isystem/-D, 不再手工维护清单"
+            echo " · 第8轮: 符号校验用 printf|grep -q, pipefail 下 SIGPIPE(141)"
+            echo "          让**命中反判失败**; 五个符号其实全在。改用内建 case"
             echo " · 第7轮: JNI 链接漏 pcre2 —— find 只扫 build-android/, 而"
             echo "          SLIMT_USE_INTERNAL_PCRE2=OFF 时 pcre2 是外部预编库,"
             echo "          装在 \$PCRE2_ROOT/lib/ 不在构建目录 -> 8 个 pcre2_*_8"
