@@ -192,6 +192,9 @@ jobs:
       # --vocabulary/--shortlist 一组显式路径参数)。CLI11 报
       # "The following arguments were not expected: en-de-tiny -m download",
       # 退出码 109 —— 对照证据整轮作废。本轮改为手动下载 + 显式路径。
+      # ⚠️ 上一轮这里的 vocab 文件名是**猜**的(vocab.deen.spm), 结果 404,
+      # 模型和 shortlist 都下来了唯独词表缺失 -> core dump(退出码 134)。
+      # 本轮改为先用 HF API 枚举 en-de/ 真实文件名再下载, 不再猜。
       - name: 对照组 en-de tiny (slimt 官方支持档位)
         id: control
         continue-on-error: true
@@ -199,18 +202,31 @@ jobs:
           set -uo pipefail
           cd "$RUNNER_TEMP/slimt"
           D="$RUNNER_TEMP/ende"
-          B='https://huggingface.co/mukowaty/firefox-translations/resolve/main/en-de'
+          B='https://huggingface.co/mukowaty/firefox-translations/resolve/main'
           mkdir -p "$D"
-          for f in model.ende.intgemm.alphas.bin vocab.deen.spm lex.50.50.ende.s2t.bin; do
-            curl -fsSL --retry 2 -o "$D/$f.gz" "$B/$f.gz" && gzip -df "$D/$f.gz" && echo "  [ok] $f"
+          echo "--- HF 上 en-de/ 的真实文件清单:"
+          FILES="$(curl -fsSL 'https://huggingface.co/api/models/mukowaty/firefox-translations' \
+            | tr ',' '\n' | grep -o '"rfilename":"[^"]*"' \
+            | sed 's/"rfilename":"//;s/"$//' | grep '^en-de/' | sort)"
+          echo "$FILES"
+          VOCAB="$(echo "$FILES" | grep -E '/vocab\..*\.spm\.gz$' | head -1)"
+          MODEL="$(echo "$FILES" | grep -E '/model\..*\.intgemm\.alphas\.bin\.gz$' | head -1)"
+          SHORT="$(echo "$FILES" | grep -E '/lex\..*\.s2t\.bin\.gz$' | head -1)"
+          echo "选定 -> model=$MODEL vocab=$VOCAB shortlist=$SHORT"
+          for rel in "$MODEL" "$VOCAB" "$SHORT"; do
+            [ -n "$rel" ] || { echo "  [skip] 某类文件未枚举到"; continue; }
+            n="$(basename "$rel" .gz)"
+            curl -fsSL --retry 2 -o "$D/$n.gz" "$B/$rel" && gzip -df "$D/$n.gz" && echo "  [ok] $n"
           done
           ls -l "$D" || true
+          MODEL_N="$(basename "${MODEL:-x}" .gz)"; VOCAB_N="$(basename "${VOCAB:-x}" .gz)"
+          SHORT_N="$(basename "${SHORT:-x}" .gz)"
           echo "--- en->de 单句(与实验 1 同口径):"
           printf 'Hello world.\n' | "$CLI" \
             --root "$D" \
-            --model model.ende.intgemm.alphas.bin \
-            --vocabulary vocab.deen.spm \
-            --shortlist lex.50.50.ende.s2t.bin 2>&1
+            --model "$MODEL_N" \
+            --vocabulary "$VOCAB_N" \
+            --shortlist "$SHORT_N" 2>&1
           echo "对照组退出码: $?"
 
       # ============================================================
@@ -258,7 +274,12 @@ jobs:
           cd "$RUNNER_TEMP/slimt"
           D="$RUNNER_TEMP/models/zhen"
           PREFIX="$RUNNER_TEMP/models/nonbreaking_prefix.en"
+          # ⚠️ 上一轮这里把**绝对路径**传给了 --ssplit, 而 --root 会前缀
+          # **所有**路径参数, 拼出 "/models/zhen//home/runner/.../prefix.en"
+          # -> Failed to open file -> std::runtime_error -> core dump(134)。
+          # 正确做法: 把前缀表拷进 --root 目录, 只传**相对文件名**。
           if [ -f "$PREFIX" ]; then
+            cp "$PREFIX" "$D/nonbreaking_prefix.en"
             echo "用 splitter + paragraph 模式处理多句单行:"
             printf '人工智能正在改变世界。这是一个测试句子。科技改变生活。' | \
               "$CLI" \
@@ -266,14 +287,17 @@ jobs:
                 --model model.zhen.intgemm.alphas.bin \
                 --vocabulary vocab.zhen.spm \
                 --shortlist lex.50.50.zhen.s2t.bin \
-                --ssplit "$PREFIX" \
+                --ssplit nonbreaking_prefix.en \
                 --split-mode paragraph 2>&1
             echo "--- 退出码: $?"
           else
             echo "前缀表未取到, 跳过实验 2"
           fi
 
-      # en-zh 双 vocab 已从源码坐实结构性不通, 本轮不再浪费步骤重跑:
+      # ============================================================
+      # 本轮主角 — GCS 单 vocab en->zh 模型
+      # ============================================================
+      # HF 镜像的 en-zh 是双 vocab, 而 slimt 结构性只支持单 vocab:
       #   Model.hh:24-26      struct Package 只有单个 vocabulary 字段
       #   Model.hh:79         Model 内部也只持有一个 vocabulary_
       #   Vocabulary.hh:16-17 构造函数只接受单个 fpath/View
@@ -281,36 +305,94 @@ jobs:
       # 上一轮实测两路均乱码(srcvocab: ", NTT,ty per. 70:18 per";
       # trgvocab: ", NTT,不可分割的更多Kan Computing珊瑚, , ,"), 与分析一致。
       #
-      # 改为探路: 是否存在**单 vocab** 的英中语向可替代。
-      # 这条关系到 OCR->朗读的主场景(en->zh), 是 slimt 路线的核心风险。
-      - name: 探路 — 是否有单 vocab 的英中语向
-        id: probe
+      # 但 Mozilla 的 en-zh **初版(2025-02-11, PR #177)就是单 vocab**,
+      # 2025-03-17(PR #184)才换成 src/trg 双 vocab。初版训练产物仍留在
+      # 公开 GCS bucket 里 —— 遍历 models/en-zh/ 全部 1826 个对象,
+      # 单 vocab 命中仅此 1 个(另 5 个目录全是双 vocab)。
+      #
+      # 已离线校验: 三个文件的 sha256 与 GitHub 提交 250530e63f 的 LFS
+      # 指针 oid 逐字节一致; 解压后 vocab.enzh.spm 为 1358432 字节,
+      # magic bytes 0a0d 0a04 3c2f 733e 是标准 sentencepiece protobuf。
+      # metadata 为 dim-vocabs [64000,64000] + tied-embeddings-all: true,
+      # 即源/目标共享同一词表 —— 正是 slimt 需要的形态。
+      - name: 下载 GCS 单 vocab en-zh 模型
+        id: gcs_dl
         continue-on-error: true
         run: |
           set -uo pipefail
-          echo "枚举 HF 镜像里所有含 zh 的语向及其 vocab 形态:"
-          curl -fsSL 'https://huggingface.co/api/models/mukowaty/firefox-translations' \
-            | tr ',' '\n' | grep -o '"rfilename":"[^"]*"' \
-            | sed 's/"rfilename":"//;s/"$//' \
-            | grep -E '(^|/)(en-zh|zh-en|en-zh_hant|zh_hant-en)/' \
-            | sort || echo "枚举失败"
+          G='https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported'
+          D="$RUNNER_TEMP/models/enzh_single"
+          mkdir -p "$D"
+          for f in model.enzh.intgemm.alphas.bin vocab.enzh.spm lex.50.50.enzh.s2t.bin; do
+            echo "拉取 $f.gz"
+            curl -fsSL --retry 3 --retry-delay 2 -o "$D/$f.gz" "$G/$f.gz" || { echo "  [fail] $f"; continue; }
+            gzip -dc "$D/$f.gz" > "$D/$f" && rm -f "$D/$f.gz"
+            ls -l "$D/$f"
+          done
+          echo "--- metadata.json(确认 dim-vocabs / tied-embeddings-all):"
+          curl -fsSL "$G/metadata.json" 2>/dev/null || echo "(metadata 取不到, 不阻塞)"
           echo
-          echo "判据: 若某英中语向只有单个 vocab.*.spm(无 src/trg 分离),"
-          echo "则该语向可直接喂进 slimt, en->zh 主场景有解。"
+          echo "--- vocab 前 16 字节(应为 sentencepiece protobuf magic):"
+          head -c 16 "$D/vocab.enzh.spm" | xxd || true
+          du -sh "$D"
+
+      # 实验 4A: 带 shortlist。口径与实验 1 完全一致(每行一句)。
+      - name: 实验 4A — en->zh 单 vocab + shortlist
+        id: exp4a
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          D="$RUNNER_TEMP/models/enzh_single"
+          test -f "$D/vocab.enzh.spm" || { echo "模型未就绪, 跳过"; exit 1; }
+          printf 'Artificial intelligence is changing the world.\nThis is a test sentence.\nTechnology changes life.\n' | \
+            "$CLI" \
+              --root "$D" \
+              --model model.enzh.intgemm.alphas.bin \
+              --vocabulary vocab.enzh.spm \
+              --shortlist lex.50.50.enzh.s2t.bin 2>&1
+          echo "--- 退出码: $?"
+
+      # 实验 4B: 不带 shortlist。
+      # 依据 PR #184 正文: "There's a bug with the shortlist for this model,
+      # so I disabled it for now since it's also disabled in production."
+      # 该说明针对的是换成双 vocab 后的版本, 但同族训练产物有同样风险,
+      # 故必须做这组对照 —— 若 4A 乱码而 4B 干净, 即锁定 shortlist 为病灶。
+      - name: 实验 4B — en->zh 单 vocab 不带 shortlist
+        id: exp4b
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/slimt"
+          D="$RUNNER_TEMP/models/enzh_single"
+          test -f "$D/vocab.enzh.spm" || { echo "模型未就绪, 跳过"; exit 1; }
+          printf 'Artificial intelligence is changing the world.\nThis is a test sentence.\nTechnology changes life.\n' | \
+            "$CLI" \
+              --root "$D" \
+              --model model.enzh.intgemm.alphas.bin \
+              --vocabulary vocab.enzh.spm 2>&1
+          echo "--- 退出码: $?"
 
       - name: G4.1 门禁判定
         if: always()
         run: |
-          echo "实验 1 (单句 zh-en):  ${{ steps.exp1.outcome }}"
-          echo "实验 2 (splitter):    ${{ steps.exp2.outcome }}"
-          echo "实验 3 (en-de 对照):  ${{ steps.control.outcome }}"
-          echo "探路 (英中单 vocab):  ${{ steps.probe.outcome }}"
+          echo "实验 1  (单句 zh-en):        ${{ steps.exp1.outcome }}"
+          echo "实验 2  (splitter 切句):     ${{ steps.exp2.outcome }}"
+          echo "实验 3  (en-de 对照):        ${{ steps.control.outcome }}"
+          echo "GCS 下载 (单 vocab en-zh):   ${{ steps.gcs_dl.outcome }}"
+          echo "实验 4A (en-zh + shortlist): ${{ steps.exp4a.outcome }}"
+          echo "实验 4B (en-zh 无 shortlist): ${{ steps.exp4b.outcome }}"
           echo
           echo "门禁标准(docs/13 §G4.1): 译文正确性由人工看上面日志判定,"
-          echo "退出码 0 只是必要条件 —— 上一轮三路全 rc=0 但两路是乱码。"
+          echo "退出码 0 只是必要条件 —— 第 5 轮三路全 rc=0 但两路是乱码。"
           echo
-          echo "本轮关键判据:"
-          echo "  实验 1 单句干净 => base 档在 slimt 上可用, 上层按句喂即可;"
-          echo "  实验 1 仍退化   => 与切分无关, 触发 §1.2 bergamot 回退;"
-          echo "  实验 3 若也退化 => 问题在引擎多句处理, 与 base 档无关。"
+          echo "本轮关键判据(zh-en 已于上一轮通过, 焦点是 en-zh 主场景):"
+          echo "  4A 或 4B 任一干净 => en->zh 有解, **上游 slimt 零改动**,"
+          echo "                        双向齐活, G4.1 通过, 进 G4.2 交叉编译;"
+          echo "  4A 乱码 / 4B 干净 => shortlist 是病灶, 线上加载时跳过它即可;"
+          echo "  两组都乱码        => 单 vocab 路线不成立, 退回二选一:"
+          echo "                        (a) 给 slimt 打双 vocab 补丁(有 DavidVentura"
+          echo "                            fork + F-Droid 上架版作为先例),"
+          echo "                        (b) 换 CTranslate2 + OPUS-MT(MIT, 但 NDK"
+          echo "                            集成无先例, 预估 2-4 周真机调试)。"
 
