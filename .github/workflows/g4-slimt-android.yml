@@ -114,6 +114,61 @@ jobs:
           echo "--- 确认 neon64 头文件在(Gemmology.cc:17 要用):"
           find "$RUNNER_TEMP/xsimd-install" -path '*neon64*' -name '*.hpp' | head -3
 
+      # ⚠️ 第 2 轮 build 挂在这: ninja 报
+      #   'lib/libpcre2-8.a', needed by 'slimt/libslimt.so', missing and
+      #   no known rule to make it
+      # 根因**不是**交叉编译, 是 slimt 内置 pcre2 路径在 Ninja 下本身不成立:
+      # cmake/FindPCRE2.cmake:71-73 把 lib/libpcre2-8.a 硬写进
+      # INTERFACE_LINK_LIBRARIES, 但 :76-85 的 ExternalProject_Add **没有**
+      # BUILD_BYPRODUCTS(全仓 grep 无此关键字)。CMake 对纯路径 link item 会
+      # 登记成文件依赖, Ninja 要求每个输入文件都有产出规则 -> 生成期通过
+      # (configure 退出码 0, 只打印了下载消息), 构建期立刻报错。
+      # 上游 .github/workflows/ 只有 main.yml, 没有 Android 线, 这条路没人走过。
+      #
+      # 故改走 SLIMT_USE_INTERNAL_PCRE2=OFF + 自己交叉编静态库, 让
+      # FindPCRE2.cmake:95-102 的 find_library/find_path 分支去找 ——
+      # 与 xsimd 完全对称, **slimt 源码零改动**(方案 A 是 sed 补
+      # BUILD_BYPRODUCTS, 会破坏「上游未改动」这个 G4.1 结论, 不取)。
+      # 附带好处: 内置路径要在 slimt build 目录里再套一层 cmake, NDK
+      # toolchain 靠 :55 手工转发, 转发链长了更难查; 自己编只有一层。
+      - name: 准备 pcre2 (交叉编译静态库)
+        run: |
+          set -euo pipefail
+          # 版本对齐 FindPCRE2.cmake:12 的 10.43, 避免与上游预期的 API 漂移。
+          git clone --depth 1 --branch pcre2-10.43 \
+            https://github.com/PCRE2Project/pcre2.git "$RUNNER_TEMP/pcre2"
+          cd "$RUNNER_TEMP/pcre2"
+          cmake -B build-android -S . -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_TOOLCHAIN" \
+            -DANDROID_ABI="$ANDROID_ABI" \
+            -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/pcre2-install" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DPCRE2_BUILD_PCRE2GREP=OFF \
+            -DPCRE2_BUILD_TESTS=OFF \
+            -DPCRE2_SUPPORT_JIT=OFF >/dev/null
+          cmake --build build-android --parallel >/dev/null
+          cmake --install build-android >/dev/null
+          echo "PCRE2_ROOT=$RUNNER_TEMP/pcre2-install" >> "$GITHUB_ENV"
+          echo "--- 装出的产物(find_library 要靠 NAMES pcre2-8 命中 libpcre2-8.a):"
+          ls -l "$RUNNER_TEMP/pcre2-install/lib/" | grep -E '\.a$|\.so' || true
+          test -f "$RUNNER_TEMP/pcre2-install/include/pcre2.h" \
+            && echo "  [ok] pcre2.h 在(find_path 要用)" \
+            || { echo "  [FAIL] 缺 pcre2.h"; exit 1; }
+          echo "--- 确认是 aarch64 而非宿主 x86_64(防 toolchain 没生效):"
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readobj" \
+            --file-headers "$RUNNER_TEMP/pcre2-install/lib/libpcre2-8.a" \
+            2>/dev/null | grep -m1 -E 'Machine|Arch' || \
+            file "$RUNNER_TEMP/pcre2-install/lib/libpcre2-8.a"
+
+      # PCRE2_SUPPORT_JIT=OFF 的取舍: aarch64 上 pcre2 JIT 可用, 但 Android
+      # 对可执行 mmap(W^X)有限制, 真机上更容易出问题; 而 ssplit 的正则只用于
+      # 断句, G4.1 已证实它**切不了中文**(nonbreaking_prefix.en 是英文前缀表,
+      # 对「。」不起作用), 断句本来就留在 Dart 侧 TtsService。故关掉 JIT
+      # 换稳定性, 无性能损失。
+
       - name: 克隆 slimt
         run: |
           set -euo pipefail
@@ -135,8 +190,18 @@ jobs:
       #   WITH_GEMMOLOGY=ON          默认 ON, 矩阵乘走 gemmology
       #   USE_NEON=ON                aarch64 SIMD, 替代 x86 的 AVX2/SSSE3/SSE2
       #   USE_BUILTIN_SENTENCEPIECE  默认已是 ON, 显式写出防上游改默认值
-      #   SLIMT_USE_INTERNAL_PCRE2   ⚠️ 名字是 SLIMT_ 前缀不是 SSPLIT_,
-      #                              docs/13 §G4.2 写成 SSPLIT_ 是错的
+      #   SLIMT_USE_INTERNAL_PCRE2   ⚠️ 两点:
+      #                              (1) 名字是 SLIMT_ 前缀不是 SSPLIT_,
+      #                                  docs/13 §G4.2 写成 SSPLIT_ 是错的;
+      #                              (2) 本轮改为 **OFF** —— ON 的内置路径在
+      #                                  Ninja 下必挂(见上方 pcre2 步骤注释),
+      #                                  改用预编好的 arm64 静态库。
+      #   PCRE2_LIBRARIES /          直接预置 find_library/find_path 的**结果
+      #   PCRE2_INCLUDE_DIR          变量**: 已在 cache 里就跳过搜索, 这样
+      #                              runner 若自带 x86_64 libpcre2-dev 也绝无
+      #                              可能被误命中(交叉编译时链进宿主架构静态库
+      #                              会在链接期才报 incompatible, 很难查)。
+      #                              FindPCRE2.cmake:103 判的就是这两个变量。
       #   WITH_BLAS=OFF              避开 openblas 交叉编译。
       #   WITH_RUY=ON                ⚠️ 必须显式开 —— CMakeLists.txt:19 的注释
       #                              "Use BLAS. Otherwise moves to ruy" 描述的是
@@ -168,10 +233,12 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$XSIMD_ROOT" \
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DPCRE2_LIBRARIES="$PCRE2_ROOT/lib/libpcre2-8.a" \
+            -DPCRE2_INCLUDE_DIR="$PCRE2_ROOT/include" \
             -DWITH_GEMMOLOGY=ON \
             -DUSE_NEON=ON \
             -DUSE_BUILTIN_SENTENCEPIECE=ON \
-            -DSLIMT_USE_INTERNAL_PCRE2=ON \
+            -DSLIMT_USE_INTERNAL_PCRE2=OFF \
             -DWITH_BLAS=OFF \
             -DWITH_RUY=ON \
             -DBUILD_SHARED=ON \
@@ -267,8 +334,14 @@ jobs:
             echo "   3. ANDROID_PLATFORM 抬到 android-30  (排除 API level 缺符号)"
             echo "   4. 上述都不行 -> 走 §1.2 bergamot-translator 回退"
             echo
-            echo "本轮已排除: 「WITH_BLAS=OFF 自动退 ruy」是错的(注释描述源码"
-            echo "行为, CMake 两开关独立), 已显式补 WITH_RUY=ON。"
+            echo "累计已排除(每轮一条根因, 不重复踩):"
+            echo " · 第1轮: xsimd 不是 vendored 依赖 -> 已预装 header-only 包"
+            echo " · 第2轮: 「WITH_BLAS=OFF 自动退 ruy」是错的(注释描述源码"
+            echo "          行为, CMake 两开关独立) -> 已显式补 WITH_RUY=ON"
+            echo " · 第3轮: SLIMT_USE_INTERNAL_PCRE2=ON 在 Ninja 下必挂"
+            echo "          (ExternalProject 缺 BUILD_BYPRODUCTS, 而库路径已被"
+            echo "          硬写进 INTERFACE_LINK_LIBRARIES) -> 改 OFF + 预编"
+            echo "          arm64 静态库, slimt 源码仍零改动"
             echo
             echo "本轮错误已在「编译 libslimt.so」步骤末尾摘出首 30 条。"
           fi
