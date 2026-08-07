@@ -84,7 +84,11 @@ jobs:
           cmake --version
           ninja --version
 
-      # ⚠️ 上一轮 configure 就挂在这: CMakeLists.txt:137 是
+      # ⚠️ 第 4 轮起 WITH_GEMMOLOGY=OFF, 本步骤产物**本轮用不到**。
+      # 仍保留: header-only 不进 libslimt.so 的 NEEDED 段, 成本仅几秒;
+      # 而门禁备选路径 1(换回 gemmology) 一旦要用它就得在, 删了再加更费事。
+      #
+      # 上一轮 configure 曾挂在这: CMakeLists.txt:137 是
       # find_package(xsimd REQUIRED), 而 xsimd **不是** vendored 依赖 ——
       # 3rd-party/ 只有 gemmology/intgemm/ruy/sentencepiece 四个 submodule。
       # G4.1 时它来自系统包 libxsimd-dev, 交叉编译时目标侧没有。
@@ -187,7 +191,6 @@ jobs:
       # 交叉编译 — 全内置组合
       # ============================================================
       # 选项名以 CMakeLists.txt 实测为准(G4.1 日志第 13-36 行), 不照抄文档:
-      #   WITH_GEMMOLOGY=ON          默认 ON, 矩阵乘走 gemmology
       #   USE_NEON=ON                aarch64 SIMD, 替代 x86 的 AVX2/SSSE3/SSE2
       #   USE_BUILTIN_SENTENCEPIECE  默认已是 ON, 显式写出防上游改默认值
       #   SLIMT_USE_INTERNAL_PCRE2   ⚠️ 两点:
@@ -202,24 +205,39 @@ jobs:
       #                              可能被误命中(交叉编译时链进宿主架构静态库
       #                              会在链接期才报 incompatible, 很难查)。
       #                              FindPCRE2.cmake:103 判的就是这两个变量。
-      #   WITH_BLAS=OFF              避开 openblas 交叉编译。
-      #   WITH_RUY=ON                ⚠️ 必须显式开 —— CMakeLists.txt:19 的注释
-      #                              "Use BLAS. Otherwise moves to ruy" 描述的是
-      #                              **源码**行为(TensorOps.cc:22 在
-      #                              !SLIMT_HAS_BLAS 时 #include "ruy/ruy.h",
-      #                              :396 的 #else 用 ruy 实现 matrix_multiply),
-      #                              但 CMake 侧 WITH_BLAS 与 WITH_RUY 是两个
-      #                              **完全独立**的 option, 关掉 BLAS 不会自动
-      #                              置 WITH_RUY=ON。而 3rd-party/CMakeLists.txt
-      #                              只在 WITH_RUY 时 add_subdirectory(ruy),
-      #                              CMakeLists.txt:131-134 也只在此时链接 ruy。
-      #                              上一轮只关 BLAS 没开 RUY, 等于两个后端都缺。
       #   BUILD_SHARED=ON            我们要的就是 libslimt.so
       #   WITH_TESTS=OFF             默认 OFF, 交叉编译跑不了测试
       #
-      # NEON 侧不需要 G4.1 那样的多档手工对齐: Gemmology.cc:17 只声明
-      # arch_list<neon64> 单档, 第 77-88 行也只实例化 neon64, 两处口径一致
-      # (x86 侧是 #elif 级联声明三档但 #ifdef 各自独立, 才要三个开关一起开)。
+      # ⚠️⚠️ int8 后端**三选一**, 不可同开 —— 第 3 轮挂在这:
+      #   QMM.cc:30:20: error: redefinition of 'kProvider'
+      # QMM.cc:12/21/30 在**同一个** namespace slimt::qmm::detail 里各定义一次
+      # `constexpr Provider kProvider`, 分别由 SLIMT_HAS_INTGEMM /
+      # SLIMT_HAS_RUY / SLIMT_HAS_GEMMOLOGY 三个独立 #ifdef 守卫。同开两个宏
+      # 就是同一符号定义两次。ruy 是 gemmology 的**替代**而非补充。
+      # 佐证: 上游 CI(main.yml:212)的组合是
+      #   -DBLA_VENDOR=OpenBLAS -DWITH_GEMMOLOGY=ON -DUSE_AVX2=ON ...
+      # 即 WITH_BLAS 保持默认 ON + gemmology, **完全不碰 WITH_RUY**。
+      #
+      # 且 WITH_RUY 一个开关绑死两件事, 无法拆开(CMakeLists.txt:131-134):
+      #   list(APPEND SLIMT_COMPILE_DEFINITIONS SLIMT_HAS_RUY)  # 宏
+      #   list(APPEND SLIMT_PRIVATE_LIBS ruy)                   # 链接
+      # 而 3rd-party/CMakeLists.txt:49-51 也只在 WITH_RUY 时 add_subdirectory。
+      # 故本轮取:
+      #   WITH_BLAS=OFF + WITH_RUY=ON + WITH_GEMMOLOGY=OFF
+      #     fp32: TensorOps.cc:22 在 !SLIMT_HAS_BLAS 时 #include "ruy/ruy.h",
+      #           :396 的 #else 用 ruy 实现 matrix_multiply —— 注意该文件
+      #           **只认 SLIMT_HAS_BLAS, 从不看 SLIMT_HAS_RUY**, 所以 fp32
+      #           走 ruy 是自动的; WITH_RUY=ON 的作用是让 ruy 真的被编译链接
+      #           (否则 #include 找不到头 + 链接期缺符号)。
+      #     int8: QMM.cc:18 的 SLIMT_HAS_RUY 分支 + Ruy.inl.cc
+      #   代价: xsimd 白装(无害, header-only 不进 NEEDED); int8 性能未知,
+      #         但 ruy 是 Google 为 ARM 手写 NEON 内核的库, arm64 上不见得
+      #         比 gemmology 慢。若性能不达标, 回退方案见门禁输出。
+      #
+      # 注: gemmology 关掉后, 下面这条 NEON 对齐结论本轮用不上, 保留备查 ——
+      # Gemmology.cc:17 只声明 arch_list<neon64> 单档, 第 77-88 行也只实例化
+      # neon64, 两处口径一致(x86 侧是 #elif 级联声明三档但 #ifdef 各自独立,
+      # 才要三个开关一起开)。将来若换回 gemmology 直接开 USE_NEON 即可。
       - name: 配置交叉编译 (全内置依赖)
         id: configure
         continue-on-error: true
@@ -235,7 +253,7 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DPCRE2_LIBRARIES="$PCRE2_ROOT/lib/libpcre2-8.a" \
             -DPCRE2_INCLUDE_DIR="$PCRE2_ROOT/include" \
-            -DWITH_GEMMOLOGY=ON \
+            -DWITH_GEMMOLOGY=OFF \
             -DUSE_NEON=ON \
             -DUSE_BUILTIN_SENTENCEPIECE=ON \
             -DSLIMT_USE_INTERNAL_PCRE2=OFF \
@@ -246,6 +264,12 @@ jobs:
             -DWITH_TESTS=OFF 2>&1 | tee "$RUNNER_TEMP/configure.log"
           rc="${PIPESTATUS[0]}"
           echo "--- configure 退出码: $rc"
+          echo
+          echo "--- 确认只启用了一个 int8 后端(防 kProvider 重定义复发):"
+          grep -cE 'SLIMT_HAS_(RUY|GEMMOLOGY|INTGEMM)' \
+            build-android/CMakeCache.txt 2>/dev/null || true
+          grep -E '^WITH_(RUY|GEMMOLOGY|INTGEMM|BLAS):' \
+            build-android/CMakeCache.txt 2>/dev/null || true
           echo
           echo "--- CMake Error 摘要(便于下一轮定位):"
           grep -nE 'CMake Error|Could NOT find|Configuring incomplete' \
@@ -327,11 +351,13 @@ jobs:
             echo "=> G4.2 通过。产物已上传 artifact, 可进 G4.3(JNI 桥接)。"
           else
             echo "=> G4.2 未通过。备选路径(已按本轮已排除项更新):"
-            echo "   1. WITH_GEMMOLOGY=OFF  (int8 也交给 ruy, 放弃 gemmology;"
-            echo "      QMM.cc:18 的 SLIMT_HAS_RUY 分支有 Ruy.inl.cc 实现,"
-            echo "      代价是 int8 矩阵乘性能可能低于 gemmology)"
-            echo "   2. xsimd 换 11.x/12.x  (若报 neon64/arch_list API 不匹配)"
-            echo "   3. ANDROID_PLATFORM 抬到 android-30  (排除 API level 缺符号)"
+            echo "   1. 换回 gemmology 后端: WITH_GEMMOLOGY=ON + WITH_RUY=OFF"
+            echo "      + WITH_BLAS=ON, 并为 arm64 交叉编 OpenBLAS。这与上游"
+            echo "      CI(main.yml:212) 同构, 是唯一被上游验证过的组合,"
+            echo "      代价是多编一个 OpenBLAS(当初正为省这一步才选 ruy)"
+            echo "   2. ANDROID_PLATFORM 抬到 android-30  (排除 API level 缺符号)"
+            echo "   3. ruy 若在 aarch64 编不过, 试固定 ruy 到更早 tag"
+            echo "      (它是 slimt 的 submodule, 可单独 checkout)"
             echo "   4. 上述都不行 -> 走 §1.2 bergamot-translator 回退"
             echo
             echo "累计已排除(每轮一条根因, 不重复踩):"
@@ -342,6 +368,9 @@ jobs:
             echo "          (ExternalProject 缺 BUILD_BYPRODUCTS, 而库路径已被"
             echo "          硬写进 INTERFACE_LINK_LIBRARIES) -> 改 OFF + 预编"
             echo "          arm64 静态库, slimt 源码仍零改动"
+            echo " · 第4轮: int8 后端三选一, ruy 与 gemmology 同开必然"
+            echo "          QMM.cc kProvider 重定义(三个 #ifdef 在同一 namespace"
+            echo "          各定义一次) -> 关 GEMMOLOGY, fp32+int8 统一走 ruy"
             echo
             echo "本轮错误已在「编译 libslimt.so」步骤末尾摘出首 30 条。"
           fi
