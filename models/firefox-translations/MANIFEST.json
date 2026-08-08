@@ -14,7 +14,7 @@
     {
       "id": "release",
       "priority": 2,
-      "comment": "GitHub Release 附件(不计入 LFS 配额, 单文件上限 2 GB)。附件是扁平命名空间, 故用 name 而非 path; 六个文件名本身已含语向标识(zhen/enzh), 无冲突。",
+      "comment": "GitHub Release 附件。附件是扁平命名空间, 故用 name 而非 path; 六个文件名本身已含语向标识(zhen/enzh), 无冲突。",
       "url_template": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/{name}.gz",
       "verify_with": "sha256_gz"
     },
