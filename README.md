@@ -23,13 +23,16 @@
 
 ---
 
-## 一、你的电脑当前状态
-检测到本机**只有 Node.js,没有安装 Flutter SDK 和 Android SDK**。
-源码已全部写好,但要生成可安装的 APK,需要先具备构建环境。下面两种方式任选其一。
+## 一、构建方式
+
+生成可安装的 APK 需要 Flutter 与 Android 构建环境。下面提供两种方式，任选其一：
+
+- **方式 A**：在本机安装 Flutter 构建
+- **方式 B**：通过云端 GitHub Actions 打包（免装本地环境）
 
 ---
 
-## 二、方式 A:本机安装 Flutter 构建(推荐,可长期开发)
+## 二、方式 A:本机安装 Flutter 构建
 
 ### 1. 安装 Flutter SDK
 - 下载:https://docs.flutter.dev/get-started/install/windows
@@ -66,10 +69,9 @@ speak_reader/build/app/outputs/flutter-apk/app-release.apk
 
 ## 三、方式 B:云端打包 APK(免装任何环境)
 
-已内置 GitHub Actions 配置(`.github/workflows/build-apk.yml`)。
+项目已内置 GitHub Actions 配置(`.github/workflows/build-apk.yml`)。
 
-1. 在 GitHub 新建一个仓库。
-2. 把 `speak_reader` 目录内容推送上去:
+1. 将本项目推送到你的 GitHub 仓库:
    ```bash
    cd speak_reader
    git init
@@ -79,8 +81,8 @@ speak_reader/build/app/outputs/flutter-apk/app-release.apk
    git remote add origin <你的仓库地址>
    git push -u origin main
    ```
-3. 推送后 Actions 自动开始构建(也可在仓库 Actions 页手动触发 "Build Android APK")。
-4. 构建完成后,进入该次运行的 **Artifacts**,下载 `speak-reader-apk`,解压得到 APK。
+2. 推送后 Actions 自动开始构建(也可在仓库 Actions 页手动触发 "Build Android APK")。
+3. 构建完成后,进入该次运行的 **Artifacts**,下载 `speak-reader-apk`,解压得到 APK。
 
 ---
 

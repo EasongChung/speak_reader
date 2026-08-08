@@ -4,7 +4,7 @@ import android.os.Build
 import android.util.Log
 
 /**
- * [G4.3] slimt 离线翻译原生库的 Kotlin 侧入口。
+ * `G4.3` slimt 离线翻译原生库的 Kotlin 侧入口。
  *
  * ## 为什么可用性判定放在这里
  *

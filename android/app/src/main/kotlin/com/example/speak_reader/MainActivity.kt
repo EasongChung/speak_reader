@@ -33,7 +33,7 @@ class MainActivity : FlutterActivity() {
     // FlutterActivity 不是 ComponentActivity 的子类, 拿不到 registerForActivityResult。
     private val pickModelDirRequest = 0x51A1
 
-    /** [G4.3] 目录选择结果回调; 选择器打开期间非 null。 */
+    /** `G4.3` 目录选择结果回调; 选择器打开期间非 null。 */
     private var pendingDirResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -276,7 +276,7 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * [G4.3] 接收 SAF 目录选择结果。
+     * `G4.3` 接收 SAF 目录选择结果。
      *
      * 必须调 [takePersistableUriPermission], 否则授权在进程重启后失效,
      * 下次扫描会静默返回空列表 —— 表现为「上次选好的目录突然没模型了」。
