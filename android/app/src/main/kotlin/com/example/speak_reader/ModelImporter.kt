@@ -102,6 +102,8 @@ object ModelImporter {
 
         val input = context.contentResolver.openInputStream(zipUri)
             ?: throw IllegalStateException("无法读取: $zipUri")
+        // 记录本次 zip 中已清理过的组目录，避免同一 zip 中有多个文件时重复清理。
+        val clearedGroups = mutableSetOf<String>()
         input.use { ins ->
             ZipInputStream(BufferedInputStream(ins)).use { zis ->
                 var entry = zis.nextEntry
@@ -113,6 +115,19 @@ object ModelImporter {
                         val kind = classify(base)
                         if (kind != null) {
                             val group = groups.getOrPut(kind.second) { ModelGroup(kind.second) }
+                            // 导入新 zip 时清空该组旧目录，确保旧文件(v1)不会与新文件(v2)混杂。
+                            // 尤其同名模型文件(如 model.enzh.intgemm.alphas.bin)在旧版和新版中
+                            // 的输出层大小不同(64k vs 32k)，writeEntry 的"存在即跳过"会留下旧版，
+                            // 导致模型/词表不匹配而输出乱码。
+                            if (clearedGroups.add(kind.second)) {
+                                val groupDir = File(
+                                    context.filesDir, "$MODELS_DIR/${kind.second}",
+                                )
+                                if (groupDir.exists()) {
+                                    groupDir.deleteRecursively()
+                                    Log.i(TAG, "已清空旧目录: ${groupDir.absolutePath}")
+                                }
+                            }
                             val dest = File(
                                 context.filesDir, "$MODELS_DIR/${kind.second}/$base",
                             )

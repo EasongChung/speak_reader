@@ -73,7 +73,17 @@ jobs:
             echo "::error::$SO e_machine=${MACHINE}，不是 aarch64(183)"
             exit 1
           fi
-          echo "原生库校验通过：64 位 ELF / aarch64"
+          # 版本标记检查：嵌入字符串 "src/trg" 仅当 slimt_jni.cpp 设置了
+          # .target_vocabulary 字段时才存在（日志 "双(src/trg)" 的 ASCII 子串）。
+          # 该字段只存在于 patch 后的 Model.hh 中，故本检查同时验证：
+          #   ① slimt 分离词表 patch 已应用
+          #   ② JNI 层确实传了目标侧词表路径
+          # 若 .so 不含此标记，说明它是在 patch 之前编译的旧版，应重新编译。
+          if ! grep -qa "src/trg" "$SO"; then
+            echo "::error::$SO 不含版本标记 'src/trg'，疑似旧的(无 patch)版本"
+            exit 1
+          fi
+          echo "原生库校验通过：64 位 ELF / aarch64 / 含分离词表标记"
 
       # 测试版编号独立计数：取已发布最大 g4test-<N> 自动 +1（无则 1）。
       # 不改 pubspec —— 与正式线同理，改了会形成 push→构建→push 的循环。
