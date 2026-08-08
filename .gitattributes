@@ -8,3 +8,17 @@
 *.dart eol=lf
 *.yaml eol=lf
 *.md eol=lf
+
+# 以下必须强制 LF, 否则 core.autocrlf=true 的 Windows 检出会加 CR 而失效:
+#   SHA256SUMS —— sha256sum -c 会把行尾 \r 当成文件名的一部分,
+#                 报 "No such file or directory" 且**每一行**都失败(实测)。
+#   *.patch    —— git apply 对上下文行做逐字节比对, CR 会导致 patch 拒绝套用;
+#                 CI 里 slimt 的分离词表 patch 依赖这一点。
+SHA256SUMS eol=lf
+*.patch eol=lf
+
+# PowerShell 脚本走 CRLF。文件本身**必须带 UTF-8 BOM**(已存入文件, 不是
+# 靠 git 属性实现): Windows PowerShell 5.1 在无 BOM 时按系统 ANSI(中文即
+# GBK)解码, UTF-8 中文注释会被错解并吃掉引号, 导致整个脚本 ParserError
+# 而非局部乱码。改动此文件时勿用会剥离 BOM 的编辑器保存。
+*.ps1 eol=crlf

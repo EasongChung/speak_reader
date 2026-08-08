@@ -50,19 +50,27 @@ firefox-translations/
 │   ├── model.zhen.intgemm.alphas.bin   intgemm 量化权重 (59,504,955 B)
 │   ├── vocab.zhen.spm                  sentencepiece 词表 (1,359,697 B)
 │   └── lex.50.50.zhen.s2t.bin          shortlist 词汇表 (9,220,016 B)
-└── en-zh/  (英 → 中, id=enzh, 单词表档)   ← 下载后生成
-    ├── model.enzh.intgemm.alphas.bin   intgemm 量化权重 (59,504,955 B)
-    ├── vocab.enzh.spm                  sentencepiece 词表 (1,358,432 B)
-    └── lex.50.50.enzh.s2t.bin          shortlist 词汇表 (6,298,264 B)
+└── en-zh/  (英 → 中, id=enzh, 双词表档)   ← 下载后生成
+    ├── model.enzh.intgemm.alphas.bin   intgemm 量化权重 (42,992,955 B)
+    ├── srcvocab.enzh.spm               源侧 sentencepiece 词表 (806,952 B)
+    ├── trgvocab.enzh.spm               目标侧 sentencepiece 词表 (772,004 B)
+    └── lex.50.50.enzh.s2t.bin          shortlist 词汇表 (6,506,248 B)
 ```
 
-解压后合计 137,246,319 字节(约 131 MB)。
+解压后合计 121,162,827 字节(约 116 MB)。
+
+> **en-zh 是双词表档**:两份 `.spm` 共享同一张 `Wemb` 嵌入矩阵,却是**两套不同的
+> id 空间**(实测逐 id 仅 0.82% 重合,例如 id 266 在 srcvocab 是 `▁of`、
+> 在 trgvocab 却是 `的`)。二者不可互换、不可合并 —— 传反了不会报错,只会
+> 输出乱码。App 侧须把 `srcvocab` 给 `vocabulary_path`、`trgvocab` 给
+> `target_vocabulary_path`。zh-en 仍是单词表档,`target_vocabulary_path`
+> 留空即退化为单词表行为。
 
 ## 为什么不入库
 
-GitHub 免费额度的 **Git LFS 存储与流量各 1 GB**。这组模型 131 MB,
-会占去 12.8% 存储;而**每次 `git clone` 都消耗约 131 MB 流量**——
-月配额仅够约 7 次克隆。
+GitHub 免费额度的 **Git LFS 存储与流量各 1 GB**。这组模型 116 MB,
+会占去 11.6% 存储;而**每次 `git clone` 都消耗约 116 MB 流量**——
+月配额仅够约 8 次克隆。
 
 关键不在够不够,而在**超额后果**:额度耗尽时 GitHub 会**停用该仓库的
 LFS 读写**(不是自动计费放行),届时 `git clone` 会在 checkout 阶段直接
@@ -81,11 +89,30 @@ LFS 读写**(不是自动计费放行),届时 `git clone` 会在 checkout 阶段
   - zh-en 取自 `zh-en/` 目录
 - Mozilla 官方 GCS 分发点:
   https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/
-  - en-zh 取自 `cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/`
+  - en-zh 取自 `cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw/exported/`
 
-⚠️ en-zh **刻意不用** HF 镜像那一版——它是 `srcvocab`/`trgvocab` 双词表,
-而 slimt 的 `Package` 只接受单个 `vocabulary` 字段(G4.1 实测)。
-GCS 这一版是单词表,才是可用的。
+### en-zh 为何选 `cjk_split_vocab`
+
+官方 registry 里 en-zh 只有两个变体,**两个都是双词表**:
+
+| | `cjk_split_vocab` | `llmaat_finetune10M_qe8_f2` |
+|---|---|---|
+| architecture | base | base-memory |
+| releaseStatus | None | **Release** |
+| decoder 层数 | 2 | 4 |
+| 嵌入矩阵 | 单张 `Wemb` | `encoder_Wemb` + `decoder_Wemb` |
+| chrf | **35.09** | 33.09 |
+| comet22 | 0.8556 | **0.8628** |
+
+标 `Release` 的那版用不了:slimt 硬编码只认单张 `Wemb` 与 2 层 decoder
+(`Transformer.cc` 的参数注册、`Model.cc` 的 preset),而 `load_parameters()`
+对缺失张量**只打 `[warn]` 不抛错** —— 加载 `llmaat` 不会失败,只会静默留下
+未初始化的嵌入与输出层,表现为译文全乱。在 slimt 支持 `base-memory` 架构前
+只能用 `cjk_split_vocab`,它的 chrf 反而更高。
+
+⚠️ `releaseStatus=None` 意味着官方可能下架或变更 —— 上一版所用的
+`cjk_hplt2_lr0003_70x30_*` 就已从 registry 消失。整包源(GitHub Release)
+正是为此兜底:上游没了仍可从 Release 取到逐字节一致的副本。
 
 ## 许可
 
@@ -108,11 +135,13 @@ GCS 这一版是单词表,才是可用的。
 | zh-en/model.zhen.intgemm.alphas.bin | `3535442962ec8f4a553cc19b206befcac689ee9cddaea44fa91e21527fc30ac2` |
 | zh-en/vocab.zhen.spm | `dff594318ab7d8b7b60b844ab98ebe6b932ae8045fab15235404c787715965b3` |
 | zh-en/lex.50.50.zhen.s2t.bin | `cdcad3592dc2bc4676c34c4d37203f7649ee989195cf083cbb60f1ea011f976b` |
-| en-zh/model.enzh.intgemm.alphas.bin | `31ba296821cfffcf4713176ed6f331eb1faf3f8fe433f454a37e722b5f8c4b17` |
-| en-zh/vocab.enzh.spm | `1ffaf806d8a17446675e04c99472ea716f7519d2a53ff826a1df8fa9bbcdf941` |
-| en-zh/lex.50.50.enzh.s2t.bin | `06fbe7ddd8ca547d47a68c104c5a84577e44b29de935a0e4eb5957603d746ec3` |
+| en-zh/model.enzh.intgemm.alphas.bin | `ce4486f728641a36269a245248dcb53405e76d96d9eba68dcb4172f29521e092` |
+| en-zh/srcvocab.enzh.spm | `bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5` |
+| en-zh/trgvocab.enzh.spm | `aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d` |
+| en-zh/lex.50.50.enzh.s2t.bin | `4a5e5827788060f1d718a8132b69440929387514a045796e9b77f935db68c055` |
 
 ## 使用
 
-模型经 App 内 SAF 目录选择导入(会复制进 app 私有目录),或由构建流程
-预置进 APK。slimt 用 mmap 读真实文件路径,不认 `content://` URI。
+在 App 设置页选择本目录下载好的 zip 导入(按语向各一个包,内容会解出到
+app 私有目录)。slimt 用 mmap 读真实文件路径,不认 `content://` URI,
+故必须复制而非直接引用。

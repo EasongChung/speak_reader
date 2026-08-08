@@ -209,6 +209,9 @@ class MainActivity : FlutterActivity() {
                         val shortlistPath = call.argument<String>("shortlistPath") ?: ""
                         val ssplitPath = call.argument<String>("ssplitPath") ?: ""
                         val preset = call.argument<String>("preset") ?: "base"
+                        // 空串即单词表档, slimt 侧会退化为两侧共用 vocabularyPath。
+                        val targetVocabularyPath =
+                            call.argument<String>("targetVocabularyPath") ?: ""
                         if (id.isNullOrEmpty() || modelPath.isNullOrEmpty() ||
                             vocabularyPath.isNullOrEmpty()
                         ) {
@@ -223,6 +226,7 @@ class MainActivity : FlutterActivity() {
                             SlimtBridge.load(
                                 id, modelPath, vocabularyPath,
                                 shortlistPath, ssplitPath, preset,
+                                targetVocabularyPath,
                             )
                             result.success(null)
                         } catch (e: Throwable) {

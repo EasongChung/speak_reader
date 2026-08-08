@@ -8,12 +8,23 @@ class OfflineModelGroup {
     required this.vocabularyName,
     required this.shortlistName,
     required this.hasShortlist,
+    this.targetVocabularyName = '',
+    this.hasTargetVocabulary = false,
   });
 
   /// 语向标识，如 `zhen` / `enzh`。
   final String id;
   final String modelName;
+
+  /// 源侧词表。单词表档是 `vocab.*.spm`，双词表档是 `srcvocab.*.spm`。
   final String vocabularyName;
+
+  /// 目标侧词表（`trgvocab.*.spm`）；单词表档为空串。
+  ///
+  /// 与 [vocabularyName] 是**两套不同的 id 空间**，不可互换 —— 传反不报错，
+  /// 只输出乱码（详见 `models/firefox-translations/MANIFEST.json`）。
+  final String targetVocabularyName;
+  final bool hasTargetVocabulary;
 
   /// shortlist 是可选项，缺失时为空串。
   final String shortlistName;
@@ -24,15 +35,17 @@ class OfflineModelGroup {
       id: (map['id'] as String?) ?? '',
       modelName: (map['modelName'] as String?) ?? '',
       vocabularyName: (map['vocabularyName'] as String?) ?? '',
+      targetVocabularyName: (map['targetVocabularyName'] as String?) ?? '',
       shortlistName: (map['shortlistName'] as String?) ?? '',
       hasShortlist: (map['hasShortlist'] as bool?) ?? false,
+      hasTargetVocabulary: (map['hasTargetVocabulary'] as bool?) ?? false,
     );
   }
 
-  /// 是否可加载：必须同时有权重与词表。
+  /// 是否可加载：必须同时有权重与源侧词表。
   ///
-  /// shortlist 是可选项，缺了只影响速度不影响能否工作，故不计入。
-  /// 与原生侧 `ModelImporter.import` 的判据一致（那里缺这两样会抛异常）。
+  /// shortlist 与目标侧词表都是可选项：前者缺了只影响速度，后者仅双词表档
+  /// 才有。故均不计入。与原生侧 `ModelImporter.ModelGroup.isComplete` 一致。
   bool get isComplete => modelName.isNotEmpty && vocabularyName.isNotEmpty;
 
   /// 语向的可读形式，如 `zhen` → `中文 → 英文`；无法识别时回退 id 本身。
@@ -169,6 +182,10 @@ class OfflineTranslationService {
   ///
   /// [preset] 为模型结构预设：`base`（默认，对应 firefox-translations 的
   /// base 模型）/ `tiny` / `nano`。
+  ///
+  /// [vocabularyPath] 恒为**源侧**词表。[targetVocabularyPath] 仅双词表档
+  /// （如 en-zh 的 cjk_split_vocab）需要传；留空即退化为单词表，编码与解码
+  /// 共用 [vocabularyPath]，与改造前行为一致。
   static Future<void> loadModel({
     required String id,
     required String modelPath,
@@ -176,6 +193,7 @@ class OfflineTranslationService {
     String shortlistPath = '',
     String ssplitPath = '',
     String preset = 'base',
+    String targetVocabularyPath = '',
   }) async {
     await _channel.invokeMethod<void>('loadModel', {
       'id': id,
@@ -184,6 +202,7 @@ class OfflineTranslationService {
       'shortlistPath': shortlistPath,
       'ssplitPath': ssplitPath,
       'preset': preset,
+      'targetVocabularyPath': targetVocabularyPath,
     });
   }
 

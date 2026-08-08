@@ -35,8 +35,15 @@ import java.util.zip.ZipInputStream
  *   vocab.zhen.spm
  *   lex.50.50.zhen.s2t.bin
  * ```
- * 即三类文件靠中间的**语向片段**(zhen/enzh)关联。故以语向为组 id 聚合,
+ * 即三类文件靠中间的**语向片段**关联。故以语向为组 id 聚合,
  * 而非按文件名前缀 —— 三个文件的前缀分别是 model/vocab/lex, 并不共享。
+ *
+ * 部分语向是**双词表档**(如 en-zh 的 cjk_split_vocab), 词表拆成两个文件:
+ * ```
+ *   srcvocab.enzh.spm    源侧: 文本 -> id
+ *   trgvocab.enzh.spm    目标侧: 生成的 id -> 文本
+ * ```
+ * 两表共享同一张 Wemb 却是不同 id 空间, 不可互换(详见 [classify])。
  */
 object ModelImporter {
     private const val TAG = "ModelImporter"
@@ -56,9 +63,15 @@ object ModelImporter {
     private class ModelGroup(val id: String) {
         var model: Pair<String, String>? = null
         var vocabulary: Pair<String, String>? = null
+        var targetVocabulary: Pair<String, String>? = null
         var shortlist: Pair<String, String>? = null
 
-        /** shortlist 是可选项, 模型与词表缺一不可。 */
+        /**
+         * shortlist 与目标侧词表都是可选项, 模型与源侧词表缺一不可。
+         *
+         * [targetVocabulary] 不计入: 单词表档(如 zh-en)本就没有它,
+         * 计入会把这类模型误判为不完整。
+         */
         val isComplete: Boolean
             get() = model != null && vocabulary != null
 
@@ -66,8 +79,10 @@ object ModelImporter {
             "id" to id,
             "modelName" to (model?.first ?: ""),
             "vocabularyName" to (vocabulary?.first ?: ""),
+            "targetVocabularyName" to (targetVocabulary?.first ?: ""),
             "shortlistName" to (shortlist?.first ?: ""),
             "hasShortlist" to (shortlist != null),
+            "hasTargetVocabulary" to (targetVocabulary != null),
         )
     }
 
@@ -108,6 +123,9 @@ object ModelImporter {
                                 Kind.VOCABULARY ->
                                     if (group.vocabulary == null)
                                         group.vocabulary = base to dest.absolutePath
+                                Kind.TARGET_VOCABULARY ->
+                                    if (group.targetVocabulary == null)
+                                        group.targetVocabulary = base to dest.absolutePath
                                 Kind.SHORTLIST ->
                                     if (group.shortlist == null)
                                         group.shortlist = base to dest.absolutePath
@@ -148,12 +166,20 @@ object ModelImporter {
      * 文件名不做假设(不同语向的文件名不同), 仍走 [classify] 识别类别,
      * 与 [importZip] 同源。目录不存在或缺必需文件时返回空 Map,
      * 由调用方判定 —— 这里不抛异常, 因为「没导入」是正常状态而非错误。
+     *
+     * 返回键: modelPath / vocabularyPath / shortlistPath / targetVocabularyPath。
+     * 后两者可为空串(分别对应无 shortlist、单词表档)。
      */
     fun importedPaths(context: Context, groupId: String): Map<String, String> {
         val target = File(context.filesDir, "$MODELS_DIR/$groupId")
         val files = target.listFiles() ?: return emptyMap()
 
-        val result = hashMapOf("modelPath" to "", "vocabularyPath" to "", "shortlistPath" to "")
+        val result = hashMapOf(
+            "modelPath" to "",
+            "vocabularyPath" to "",
+            "shortlistPath" to "",
+            "targetVocabularyPath" to "",
+        )
         for (file in files) {
             if (!file.isFile || file.length() <= 0L) continue
             val kind = classify(file.name) ?: continue
@@ -163,6 +189,7 @@ object ModelImporter {
             val key = when (kind.first) {
                 Kind.MODEL -> "modelPath"
                 Kind.VOCABULARY -> "vocabularyPath"
+                Kind.TARGET_VOCABULARY -> "targetVocabularyPath"
                 Kind.SHORTLIST -> "shortlistPath"
             }
             if (result[key].isNullOrEmpty()) result[key] = file.absolutePath
@@ -183,7 +210,7 @@ object ModelImporter {
         }
     }
 
-    private enum class Kind { MODEL, VOCABULARY, SHORTLIST }
+    private enum class Kind { MODEL, VOCABULARY, TARGET_VOCABULARY, SHORTLIST }
 
     /**
      * 判定文件属于哪类模型文件, 并提取其语向片段作为组 id。
@@ -191,11 +218,18 @@ object ModelImporter {
      * 命名规则参照 bergamot/firefox-translations 发布物, 与 G4.1 实测所用
      * 一致(见 `13` §8.1):
      * ```
-     *   model.zhen.intgemm.alphas.bin  -> MODEL,      id=zhen
-     *   vocab.zhen.spm                 -> VOCABULARY, id=zhen
-     *   lex.50.50.zhen.s2t.bin         -> SHORTLIST,  id=zhen
+     *   model.zhen.intgemm.alphas.bin  -> MODEL,             id=zhen
+     *   vocab.zhen.spm                 -> VOCABULARY,        id=zhen  (单词表档)
+     *   srcvocab.enzh.spm              -> VOCABULARY,        id=enzh  (双词表档源侧)
+     *   trgvocab.enzh.spm              -> TARGET_VOCABULARY, id=enzh  (双词表档目标侧)
+     *   lex.50.50.zhen.s2t.bin         -> SHORTLIST,         id=zhen
      * ```
      * 无法归类或取不到语向时返回 null(调用方跳过该文件)。
+     *
+     * ⚠️ 判定顺序不可调换: `trgvocab` 必须在通用 `vocab` 之前判。二者都以
+     * `vocab` 结尾于同一位置, 若先匹配通用分支, 目标侧词表会被误判为源侧 ——
+     * 而两表的 id 空间只有 0.82% 重合(见 MANIFEST 的 vocab_layout_note),
+     * **传反不会报错, 只会输出乱码**, 属于最难查的一类故障。
      */
     private fun classify(name: String): Pair<Kind, String>? {
         val lower = name.lowercase()
@@ -205,7 +239,14 @@ object ModelImporter {
 
         val kind = when {
             lower.startsWith("model.") && lower.endsWith(".bin") -> Kind.MODEL
-            lower.startsWith("vocab") && lower.endsWith(".spm") -> Kind.VOCABULARY
+            // 目标侧先判, 见上方注释。
+            lower.startsWith("trgvocab") && lower.endsWith(".spm") ->
+                Kind.TARGET_VOCABULARY
+            // 源侧: 双词表档的 srcvocab 与单词表档的 vocab 同归此类 ——
+            // slimt 的 vocabulary_path 恒为源侧, 单词表档留空 target 即
+            // 退化为两侧共用, 与改造前行为一致。
+            (lower.startsWith("srcvocab") || lower.startsWith("vocab")) &&
+                lower.endsWith(".spm") -> Kind.VOCABULARY
             lower.startsWith("lex.") && lower.endsWith(".bin") -> Kind.SHORTLIST
             else -> return null
         }

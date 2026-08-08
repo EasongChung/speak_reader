@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 G4 离线翻译模型下载器(Windows PowerShell 5.1+)。
 

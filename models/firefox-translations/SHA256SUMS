@@ -1,6 +1,7 @@
 cdcad3592dc2bc4676c34c4d37203f7649ee989195cf083cbb60f1ea011f976b *zh-en/lex.50.50.zhen.s2t.bin
 3535442962ec8f4a553cc19b206befcac689ee9cddaea44fa91e21527fc30ac2 *zh-en/model.zhen.intgemm.alphas.bin
 dff594318ab7d8b7b60b844ab98ebe6b932ae8045fab15235404c787715965b3 *zh-en/vocab.zhen.spm
-06fbe7ddd8ca547d47a68c104c5a84577e44b29de935a0e4eb5957603d746ec3 *en-zh/lex.50.50.enzh.s2t.bin
-31ba296821cfffcf4713176ed6f331eb1faf3f8fe433f454a37e722b5f8c4b17 *en-zh/model.enzh.intgemm.alphas.bin
-1ffaf806d8a17446675e04c99472ea716f7519d2a53ff826a1df8fa9bbcdf941 *en-zh/vocab.enzh.spm
+4a5e5827788060f1d718a8132b69440929387514a045796e9b77f935db68c055 *en-zh/lex.50.50.enzh.s2t.bin
+ce4486f728641a36269a245248dcb53405e76d96d9eba68dcb4172f29521e092 *en-zh/model.enzh.intgemm.alphas.bin
+bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5 *en-zh/srcvocab.enzh.spm
+aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d *en-zh/trgvocab.enzh.spm

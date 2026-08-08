@@ -99,6 +99,8 @@ class OfflineTranslationCoordinator {
       modelPath: modelPath,
       vocabularyPath: vocabularyPath,
       shortlistPath: paths['shortlistPath'] ?? '',
+      // 单词表档为空串，原生侧据此退化为两侧共用源词表。
+      targetVocabularyPath: paths['targetVocabularyPath'] ?? '',
     );
     _loaded.add(groupId);
   }

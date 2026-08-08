@@ -1,8 +1,8 @@
 {
   "$comment": [
-    "G4 离线翻译模型分发清单。仓库内**不存**模型二进制(共约 131 MB) ——",
-    "GitHub LFS 免费额度存储/流量各 1 GB, 131 MB 会占去 12.8% 存储, 且每次",
-    "clone 消耗约 131 MB 流量(月配额仅够约 7 次)。额度耗尽时 GitHub 会**停用**",
+    "G4 离线翻译模型分发清单。仓库内**不存**模型二进制(共约 116 MB) ——",
+    "GitHub LFS 免费额度存储/流量各 1 GB, 116 MB 会占去 11.3% 存储, 且每次",
+    "clone 消耗约 116 MB 流量(月配额仅够约 8 次)。额度耗尽时 GitHub 会**停用**",
     "该仓库的 LFS 读写而非自动计费, 届时 clone 会在 checkout 阶段直接失败 ——",
     "把模型放 LFS 会让「下载兜底」本身成为单点故障, 与入库初衷相反。",
     "故改为: 仓库存清单 + 校验脚本, 二进制走 GitHub Release 单一源, 上游为最终回退。",
@@ -81,51 +81,64 @@
       "dir": "en-zh",
       "direction": "英 → 中",
       "preset": "base",
-      "vocab_layout": "single",
+      "vocab_layout": "split",
+      "vocab_layout_note": "srcvocab/trgvocab 双词表: 共享同一张 Wemb 嵌入矩阵, 但源侧与目标侧是**两套不同的 id 空间**(实测逐 id 仅 0.82% 重合, 如 id 266 在 srcvocab 是 `▁of`、在 trgvocab 是 `的`), 二者不可互换、不可合并。App 侧须把 srcvocab 传给 vocabulary_path、trgvocab 传给 target_vocabulary_path。",
       "archive": {
-        "name": "models-firefox-translations-en-zh-v1.zip",
-        "url": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/models-firefox-translations-en-zh-v1.zip",
-        "sha256_zip": "13df1a6345c3d57b16c2aeb8eaaea0cdb848f615b7493eae0eb8185e4032cf5a"
+        "name": "models-firefox-translations-en-zh-v2.zip",
+        "url": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/models-firefox-translations-en-zh-v2.zip",
+        "sha256_zip": "44b60a5d9eae158d3ccc1ceb49a078db4b287a10eb010258db8e65a7e21f5540",
+        "size_zip": 34860184
       },
-      "upstream": "Mozilla 官方 GCS 分发点 cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/",
-      "upstream_note": "⚠️ 刻意**不用** HF 镜像的 en-zh —— 那一版是 srcvocab/trgvocab 双词表, slimt 的 Package 只接受单个 vocabulary 字段(G4.1 实测)。GCS 这一版是单词表, 才是可用的。",
+      "upstream": "Mozilla 官方 GCS 分发点 cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw/exported/",
+      "upstream_variant": "cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw",
+      "upstream_note": "en-zh 在官方 registry 里只有两个变体, **都是双词表**。本包选的 cjk_split_vocab 标注 releaseStatus=None; 另一个 llmaat_finetune10M_qe8_f2 虽标 Release, 但它是 base-memory 架构(4 层 decoder + 分离的 encoder_Wemb/decoder_Wemb, 且无 none_QuantMultA), 而 slimt 硬编码只认单张 `Wemb` 与 2 层 decoder —— 加载它不会报错, 只会静默产出未初始化张量, 即译文全乱。故在 slimt 支持该架构前只能用 cjk_split_vocab。选它另有实测依据: chrf 35.09 高于 llmaat 的 33.09。注意 releaseStatus=None 意味着官方可能下架或变更(上一版所用的 cjk_hplt2 即已从 registry 消失), 整包源正是为此兜底。",
       "files": [
         {
           "role": "model",
           "name": "model.enzh.intgemm.alphas.bin",
           "path": "en-zh/model.enzh.intgemm.alphas.bin",
-          "size": 59504955,
-          "size_gz": 41000511,
-          "sha256": "31ba296821cfffcf4713176ed6f331eb1faf3f8fe433f454a37e722b5f8c4b17",
-          "sha256_gz": "92b3d47fcd43232f4bbb044caf4f8af2898b9ed5ff8a332c30c684f49468ce44",
-          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/model.enzh.intgemm.alphas.bin.gz"
+          "size": 42992955,
+          "size_gz": 30500315,
+          "sha256": "ce4486f728641a36269a245248dcb53405e76d96d9eba68dcb4172f29521e092",
+          "sha256_gz": "927de8ae55e97d9ebc29a051dfef37dd4310a1ee065b205f8e9cccfccb636a59",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw/exported/model.enzh.intgemm.alphas.bin.gz"
         },
         {
-          "role": "vocabulary",
-          "name": "vocab.enzh.spm",
-          "path": "en-zh/vocab.enzh.spm",
-          "size": 1358432,
-          "size_gz": 732075,
-          "sha256": "1ffaf806d8a17446675e04c99472ea716f7519d2a53ff826a1df8fa9bbcdf941",
-          "sha256_gz": "580807dca93eba9b5d2e46480291e96bb8050c0529b6b5dcac7f8debe2a40efc",
-          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/vocab.enzh.spm.gz"
+          "role": "source_vocabulary",
+          "name": "srcvocab.enzh.spm",
+          "path": "en-zh/srcvocab.enzh.spm",
+          "size": 806952,
+          "size_gz": 407784,
+          "sha256": "bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5",
+          "sha256_gz": "06a2e7c235ab702ab9018588048316e81546b5f24c02d293dab0b338549cfd01",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw/exported/srcvocab.enzh.spm.gz"
+        },
+        {
+          "role": "target_vocabulary",
+          "name": "trgvocab.enzh.spm",
+          "path": "en-zh/trgvocab.enzh.spm",
+          "size": 772004,
+          "size_gz": 425748,
+          "sha256": "aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d",
+          "sha256_gz": "6548dbda9f8636774f76a3d49b7a514f7d2084a0ced8883931aa07e736f6803b",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw/exported/trgvocab.enzh.spm.gz"
         },
         {
           "role": "shortlist",
           "name": "lex.50.50.enzh.s2t.bin",
           "path": "en-zh/lex.50.50.enzh.s2t.bin",
-          "size": 6298264,
-          "size_gz": 3385781,
-          "sha256": "06fbe7ddd8ca547d47a68c104c5a84577e44b29de935a0e4eb5957603d746ec3",
-          "sha256_gz": "636babed1467ec6a73ca26a1f801e60cc6fd00e29d368faaf6f0989a0576bcca",
-          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/lex.50.50.enzh.s2t.bin.gz"
+          "size": 6506248,
+          "size_gz": 3537095,
+          "sha256": "4a5e5827788060f1d718a8132b69440929387514a045796e9b77f935db68c055",
+          "sha256_gz": "a6a86815587ea3920b9e61f19b6b69d8507944ed4a15d277639619ce0a709bc8",
+          "upstream_url": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/cjk_split_vocab_e3B-g-FeQSyTW33DUj2Btw/exported/lex.50.50.enzh.s2t.bin.gz"
         }
       ]
     }
   ],
   "totals": {
-    "files": 6,
-    "size": 137246319,
-    "size_gz": 94875837
+    "files": 7,
+    "size": 121162827,
+    "size_gz": 84628412
   }
 }

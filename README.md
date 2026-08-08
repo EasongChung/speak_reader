@@ -170,7 +170,7 @@ speak_reader/
   详情见 https://www.mozilla.org/MPL/2.0/ ;模型不带额外限制
 - **本仓库位置**:`models/firefox-translations/`(两组:zh-en 与 en-zh)
 - **⚠️ 权重不入库**:该目录只有清单(`MANIFEST.json`)、校验和与下载脚本,
-  合计约 19 KB。模型本身 131 MB,按需下载:
+  合计约 19 KB。模型本身 116 MB,按需下载:
 
   ```bash
   cd models/firefox-translations
@@ -184,10 +184,13 @@ speak_reader/
   - zh-en(`zhen`):中→英
     - `model.zhen.intgemm.alphas.bin` / `vocab.zhen.spm` / `lex.50.50.zhen.s2t.bin`
     - 源:HF 镜像 `zh-en/` 目录
-  - en-zh(`enzh`):英→中
-    - `model.enzh.intgemm.alphas.bin` / `vocab.enzh.spm` / `lex.50.50.enzh.s2t.bin`
-    - 源:Mozilla 官方 GCS 分发点(单词表档;HF 那版是双词表,slimt 不收)
+  - en-zh(`enzh`):英→中,**双词表档**
+    - `model.enzh.intgemm.alphas.bin` / `srcvocab.enzh.spm` /
+      `trgvocab.enzh.spm` / `lex.50.50.enzh.s2t.bin`
+    - 源:Mozilla 官方 GCS 分发点 `cjk_split_vocab_*`
+    - 两份 `.spm` 共享同一张 `Wemb` 但 id 空间不同(逐 id 仅 0.82% 重合),
+      不可互换;传反不报错,只输出乱码
   - 所有文件与上游**逐字节一致**,未做任何改动;`model.*.bin` 为 intgemm
-    量化权重,体积约 59 MB/个
+    量化权重(zh-en 约 59 MB,en-zh 约 43 MB)
 - **再分发义务**:MPL-2.0 要求对修改后的文件提供源代码;本项目**未修改**
   任何模型文件,故无此义务。自有分发点已随附 MPL-2.0 全文与出处声明
