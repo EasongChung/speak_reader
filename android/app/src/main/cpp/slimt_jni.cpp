@@ -109,11 +109,15 @@ extern "C" {
 /// 必须由 Kotlin 侧先复制进私有目录再传路径进来。
 ///
 /// shortlist / ssplit 允许为空字符串(对应 Package 中的可选项)。
+///
+/// vocabulary_path 恒为**源侧**词表。target_vocabulary_path 仅在模型使用
+/// 分离词表(srcvocab/trgvocab, 如 en-zh 的 cjk_split_vocab)时才需要;
+/// 传空字符串即退化为单词表, 编码与解码共用 vocabulary_path。
 JNIEXPORT void JNICALL
 Java_com_example_speak_1reader_SlimtBridge_nativeLoad(
     JNIEnv *env, jobject /* thiz */, jstring id, jstring model_path,
     jstring vocabulary_path, jstring shortlist_path, jstring ssplit_path,
-    jstring preset) {
+    jstring preset, jstring target_vocabulary_path) {
   const std::string key = to_std_string(env, id);
   if (key.empty()) {
     throw_runtime(env, "模型 id 不能为空");
@@ -125,6 +129,7 @@ Java_com_example_speak_1reader_SlimtBridge_nativeLoad(
       .vocabulary = to_std_string(env, vocabulary_path),
       .shortlist = to_std_string(env, shortlist_path),
       .ssplit = to_std_string(env, ssplit_path),
+      .target_vocabulary = to_std_string(env, target_vocabulary_path),
   };
   const std::string preset_name = to_std_string(env, preset);
 
@@ -140,7 +145,9 @@ Java_com_example_speak_1reader_SlimtBridge_nativeLoad(
       std::lock_guard<std::mutex> lock(g_mutex);
       g_models[key] = std::move(model);
     }
-    LOGI("已加载模型组 %s (preset=%s)", key.c_str(), preset_name.c_str());
+    LOGI("已加载模型组 %s (preset=%s, 词表=%s)", key.c_str(),
+         preset_name.c_str(),
+         package.target_vocabulary.empty() ? "单" : "双(src/trg)");
   } catch (const std::exception &e) {
     throw_runtime(env, std::string("加载模型失败: ") + e.what());
   } catch (...) {

@@ -1,0 +1,190 @@
+diff --git a/slimt/Frontend.cc b/slimt/Frontend.cc
+index 1c881c8..f6468da 100644
+--- a/slimt/Frontend.cc
++++ b/slimt/Frontend.cc
+@@ -46,6 +46,8 @@ void exhaust(const Config &config, const Ptr<Model> &model, Batcher &batcher) {
+   while (!batch.empty()) {
+     // convert between batches.
+     Timer timer;
++    // Source side: this pads the encoder input, so it stays on the source
++    // vocabulary even for split-vocabulary models.
+     Input input = convert(batch, model->vocabulary().pad_id(),
+                           config.tgt_length_limit_factor);
+     Histories histories = model->forward(input);
+@@ -68,7 +70,7 @@ Ptr<Request> make_request(size_t id, const Ptr<Model> &model,
+       id, model->id(),                          //
+       std::move(annotated_text),                //
+       std::move(segments),                      //
+-      model->vocabulary(),                      //
++      model->target_vocabulary(),               // decodes generated ids
+       cache,                                    //
+       std::forward<Continuation>(continuation)  //
+   );
+@@ -214,6 +216,7 @@ Async::Async(const Config &config)
+       auto [batch, model] = batcher_.generate();
+       while (!batch.empty()) {
+         // convert between batches.
++        // Source side, as in exhaust() above.
+         Input input = convert(batch, model->vocabulary().pad_id(),
+                               config_.tgt_length_limit_factor);
+         Histories histories = model->forward(input);
+diff --git a/slimt/Model.cc b/slimt/Model.cc
+index 6e12396..b349ec7 100644
+--- a/slimt/Model.cc
++++ b/slimt/Model.cc
+@@ -31,10 +31,11 @@ Package<io::MmapFile> mmap_from(const Package<std::string> &package) {
+   };
+ 
+   return {
+-      .model = maybe_mmap(package.model),            //
+-      .vocabulary = maybe_mmap(package.vocabulary),  //
+-      .shortlist = maybe_mmap(package.shortlist),    //
+-      .ssplit = maybe_mmap(package.ssplit),          //
++      .model = maybe_mmap(package.model),                          //
++      .vocabulary = maybe_mmap(package.vocabulary),                //
++      .shortlist = maybe_mmap(package.shortlist),                  //
++      .ssplit = maybe_mmap(package.ssplit),                        //
++      .target_vocabulary = maybe_mmap(package.target_vocabulary),  //
+   };
+ }
+ 
+@@ -44,9 +45,27 @@ Package<View> view_from(const Package<io::MmapFile> &mmap) {
+       .vocabulary = {mmap.vocabulary.data(), mmap.vocabulary.size()},  //
+       .shortlist = {mmap.shortlist.data(), mmap.shortlist.size()},     //
+       .ssplit = {mmap.ssplit.data(), mmap.ssplit.size()},              //
++      .target_vocabulary = {mmap.target_vocabulary.data(),             //
++                            mmap.target_vocabulary.size()},            //
+   };
+ }
+ 
++// Builds the optional target-side vocabulary. Empty view (the common,
++// single-vocabulary case) yields nullopt, and Model::target_vocabulary() then
++// falls back to the source vocabulary.
++//
++// Vocabulary holds a SentencePieceProcessor, which has a user-declared
++// destructor and unique_ptr members: it is neither copyable nor movable, and
++// so is optional<Vocabulary>. Both returns below are prvalues initialising the
++// caller's object directly (guaranteed copy elision, C++17); introducing a
++// named local here would not compile.
++std::optional<Vocabulary> target_vocabulary_from(View view) {
++  if (view.data == nullptr || view.size == 0) {
++    return std::nullopt;
++  }
++  return std::optional<Vocabulary>(std::in_place, view);
++}
++
+ }  // namespace
+ 
+ Model::Model(const Config &config, const Package<View> &package)
+@@ -54,11 +73,12 @@ Model::Model(const Config &config, const Package<View> &package)
+       config_(config),
+       view_(package),
+       vocabulary_(package.vocabulary),
++      target_vocabulary_(target_vocabulary_from(package.target_vocabulary)),
+       processor_(config.split_mode, vocabulary_, Aligned()),
+       transformer_(config.encoder_layers, config.decoder_layers,
+                    config.num_heads, config.feed_forward_depth, package.model),
+       shortlist_generator_(make_shortlist_generator(
+-          package.shortlist, vocabulary_, vocabulary_)) {}
++          package.shortlist, vocabulary_, target_vocabulary())) {}
+ 
+ Model::Model(const Config &config, const Package<std::string> &package)
+     : id_(model_id++),
+@@ -66,11 +86,12 @@ Model::Model(const Config &config, const Package<std::string> &package)
+       mmap_(mmap_from(package)),
+       view_(view_from(*mmap_)),
+       vocabulary_(view_.vocabulary),
++      target_vocabulary_(target_vocabulary_from(view_.target_vocabulary)),
+       processor_(config.split_mode, vocabulary_, Aligned()),
+       transformer_(config.encoder_layers, config.decoder_layers,
+                    config.num_heads, config.feed_forward_depth, view_.model),
+       shortlist_generator_(make_shortlist_generator(
+-          view_.shortlist, vocabulary_, vocabulary_)) {}
++          view_.shortlist, vocabulary_, target_vocabulary())) {}
+ 
+ std::optional<ShortlistGenerator> Model::make_shortlist_generator(
+     View view, const Vocabulary &source, const Vocabulary &target) {
+@@ -123,7 +144,10 @@ Histories Model::decode(const Tensor &encoder_out, const Input &input) const {
+   // std::iota(indices.begin(), indices.end(), 0);
+ 
+   std::vector<bool> complete(batch_size, false);
+-  uint32_t eos = vocabulary_.eos_id();
++  // Decoding happens entirely in target-id space: the eos we stop on, and the
++  // vocabulary sizing the output layer below, both belong to the target side.
++  const Vocabulary &target = target_vocabulary();
++  uint32_t eos = target.eos_id();
+   auto record = [eos, &complete](Words &step, Sentences &sentences) {
+     size_t finished = 0;
+     for (size_t i = 0; i < step.size(); i++) {
+@@ -148,9 +172,9 @@ Histories Model::decode(const Tensor &encoder_out, const Input &input) const {
+ 
+   if (indices) {
+     previous_slice =
+-        greedy_sample_from_words(logits, vocabulary_, *indices, batch_size);
++        greedy_sample_from_words(logits, target, *indices, batch_size);
+   } else {
+-    previous_slice = greedy_sample(logits, vocabulary_, batch_size);
++    previous_slice = greedy_sample(logits, target, batch_size);
+   }
+ 
+   update_alignment(input.lengths(), complete, attn, alignments);
+@@ -163,9 +187,9 @@ Histories Model::decode(const Tensor &encoder_out, const Input &input) const {
+                                        previous_slice, indices);
+     if (indices) {
+       previous_slice =
+-          greedy_sample_from_words(logits, vocabulary_, *indices, batch_size);
++          greedy_sample_from_words(logits, target, *indices, batch_size);
+     } else {
+-      previous_slice = greedy_sample(logits, vocabulary_, batch_size);
++      previous_slice = greedy_sample(logits, target, batch_size);
+     }
+     update_alignment(input.lengths(), complete, attn, alignments);
+     remaining = record(previous_slice, sentences);
+diff --git a/slimt/Model.hh b/slimt/Model.hh
+index 4e83fbc..0923288 100644
+--- a/slimt/Model.hh
++++ b/slimt/Model.hh
+@@ -26,6 +26,17 @@ struct Package {
+   Field vocabulary;
+   Field shortlist;
+   Field ssplit;
++  // Optional separate target-side vocabulary.
++  //
++  // Some models (notably Mozilla's en->CJK ones) share a single embedding
++  // matrix but ship two vocabularies with *different* id spaces: `vocabulary`
++  // maps source text to ids, this one maps generated ids back to target text.
++  // Leave it empty for the usual single-vocabulary models, in which case
++  // `vocabulary` is used for both sides exactly as before.
++  //
++  // Declared last so existing designated initializers that omit it keep
++  // compiling and value-initialize to the empty (single-vocabulary) case.
++  Field target_vocabulary;
+ };
+ 
+ class SLIMT_EXPORT Model {
+@@ -57,6 +68,14 @@ class SLIMT_EXPORT Model {
+ 
+   const Config &config() const { return config_; }
+   const Vocabulary &vocabulary() const { return vocabulary_; }
++  // Source-side vocabulary; same object as vocabulary(), named explicitly for
++  // call-sites where the side matters.
++  const Vocabulary &source_vocabulary() const { return vocabulary_; }
++  // Target-side vocabulary, falling back to the source one when the model
++  // ships a single shared vocabulary.
++  const Vocabulary &target_vocabulary() const {
++    return target_vocabulary_ ? *target_vocabulary_ : vocabulary_;
++  }
+   const TextProcessor &processor() const { return processor_; }
+   const Transformer &transformer() const { return transformer_; }
+   size_t id() const { return id_; }  // NOLINT
+@@ -77,6 +96,10 @@ class SLIMT_EXPORT Model {
+   Package<View> view_;
+ 
+   Vocabulary vocabulary_;
++  // Declared after vocabulary_ and before shortlist_generator_: the latter
++  // holds references handed out during construction, so this must already be
++  // alive by then.
++  std::optional<Vocabulary> target_vocabulary_;
+   TextProcessor processor_;
+   Transformer transformer_;
+   std::optional<ShortlistGenerator> shortlist_generator_;

@@ -90,6 +90,10 @@ object SlimtBridge {
      * 各路径必须是**真实文件路径** —— slimt 用 mmap 读文件, 不认 content:// URI。
      * [preset] 模型结构预设: `"base"`(默认) / `"tiny"` / `"nano"`。
      *
+     * [vocabularyPath] 恒为**源侧**词表。[targetVocabularyPath] 仅在模型使用
+     * 分离词表(srcvocab/trgvocab, 如 en-zh 的 cjk_split_vocab)时才需要传;
+     * 留空即退化为单词表, 编码与解码共用 [vocabularyPath] —— 与改造前行为一致。
+     *
      * @throws RuntimeException 加载失败(文件损坏、结构不匹配等)
      */
     fun load(
@@ -99,7 +103,16 @@ object SlimtBridge {
         shortlistPath: String,
         ssplitPath: String,
         preset: String,
-    ) = nativeLoad(id, modelPath, vocabularyPath, shortlistPath, ssplitPath, preset)
+        targetVocabularyPath: String = "",
+    ) = nativeLoad(
+        id,
+        modelPath,
+        vocabularyPath,
+        shortlistPath,
+        ssplitPath,
+        preset,
+        targetVocabularyPath,
+    )
 
     /**
      * 翻译。[id] 必须先经 [load] 加载。
@@ -120,6 +133,10 @@ object SlimtBridge {
     // JNI 声明。函数名与 slimt_jni.cpp 中的
     // Java_com_example_speak_1reader_SlimtBridge_* 一一对应
     // (包名里的下划线在 JNI 命名规则中转义为 _1)。
+    //
+    // ⚠️ 参数个数必须与 C++ 侧完全一致。JNI 的短名解析(不带签名后缀)只按
+    // 函数名匹配, 少一个参数不会在链接期报错, 而是在调用时按错误的栈布局
+    // 取参 —— 表现为随机崩溃或读到垃圾路径, 比 UnsatisfiedLinkError 更难查。
     private external fun nativeLoad(
         id: String,
         modelPath: String,
@@ -127,6 +144,7 @@ object SlimtBridge {
         shortlistPath: String,
         ssplitPath: String,
         preset: String,
+        targetVocabularyPath: String,
     )
 
     private external fun nativeTranslate(id: String, text: String): String

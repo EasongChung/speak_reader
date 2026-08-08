@@ -205,6 +205,36 @@ jobs:
           git submodule status || true
           ls -1 3rd-party/ 2>/dev/null || true
 
+      # slimt 是 clone 进来的(无 submodule/无 vendoring), 所以源码改动只能
+      # 以 patch 形式随仓库提交, 在固定 commit 之后立即应用。
+      #
+      # 本 patch 的目的: slimt 只持有一个 Vocabulary 并同时用于编码/解码/
+      # 采样/shortlist, 无法表达 srcvocab+trgvocab 分离词表的模型
+      # (如 en-zh 的 cjk_split_vocab)。patch 拆出源/目标两个词表。
+      # 详见 docs/13 §8.1。
+      - name: 应用分离词表 patch
+        run: |
+          set -euo pipefail
+          PATCH="$GITHUB_WORKSPACE/.github/patches/slimt-split-vocab.patch"
+          test -f "$PATCH" || { echo "::error::patch 文件缺失: $PATCH"; exit 1; }
+          cd "$RUNNER_TEMP/slimt"
+          # --check 先干跑一次: 失败即说明 patch 与固定 commit 不匹配,
+          # 此时立刻停, 不要让后续编译在半应用的源码树上跑。
+          git apply --check --verbose "$PATCH"
+          git apply --verbose "$PATCH"
+          echo "--- patch 已应用, 校验关键改动确实落地:"
+          # 只判退出码不够: 逐个断言符号存在, 避免空 patch 或部分应用被放过。
+          for token in target_vocabulary_from source_vocabulary target_vocabulary; do
+            if grep -q "$token" slimt/Model.hh slimt/Model.cc; then
+              echo "  [OK] $token"
+            else
+              echo "::error::patch 校验失败, 源码中找不到: $token"
+              exit 1
+            fi
+          done
+          echo "--- 改动摘要:"
+          git --no-pager diff --stat
+
       # ============================================================
       # 交叉编译 — 全内置组合
       # ============================================================
