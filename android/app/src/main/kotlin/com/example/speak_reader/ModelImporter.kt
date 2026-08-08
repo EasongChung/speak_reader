@@ -187,6 +187,42 @@ object ModelImporter {
         return children.filter { it.isDirectory }.map { it.name }.sorted()
     }
 
+    /**
+     * [G4.4] 取**已导入**模型组在私有目录中的真实路径。
+     *
+     * 与 [import] 的区别: 本方法不碰 SAF, 不需要 treeUri。已导入的文件就在
+     * app 私有目录里, 加载时再要求用户重新授权目录是没有道理的 —— 授权可能
+     * 早已被系统回收, 而文件仍然好好地在那儿。
+     *
+     * 文件名不做假设(不同语向的文件名不同), 仍走 [classify] 识别类别,
+     * 与 [scan]/[import] 同源。目录不存在或缺必需文件时返回空 Map,
+     * 由调用方判定 —— 这里不抛异常, 因为「没导入」是正常状态而非错误。
+     */
+    fun importedPaths(context: Context, groupId: String): Map<String, String> {
+        val target = File(context.filesDir, "$MODELS_DIR/$groupId")
+        val files = target.listFiles() ?: return emptyMap()
+
+        val result = hashMapOf("modelPath" to "", "vocabularyPath" to "", "shortlistPath" to "")
+        for (file in files) {
+            if (!file.isFile || file.length() <= 0L) continue
+            val kind = classify(file.name) ?: continue
+            // 语向必须匹配: 私有目录理论上只有本组文件, 但导入中断等异常
+            // 可能留下残片, 放行会让 slimt 加载到错误方向的权重。
+            if (kind.second != groupId) continue
+            val key = when (kind.first) {
+                Kind.MODEL -> "modelPath"
+                Kind.VOCABULARY -> "vocabularyPath"
+                Kind.SHORTLIST -> "shortlistPath"
+            }
+            if (result[key].isNullOrEmpty()) result[key] = file.absolutePath
+        }
+
+        if (result["modelPath"].isNullOrEmpty() || result["vocabularyPath"].isNullOrEmpty()) {
+            return emptyMap()
+        }
+        return result
+    }
+
     /** 删除已导入的模型组; 不存在时静默返回。 */
     fun deleteGroup(context: Context, groupId: String) {
         val target = File(context.filesDir, "$MODELS_DIR/$groupId")

@@ -4,6 +4,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/audio_export_service.dart';
+import '../services/offline_translation_coordinator.dart';
+import '../services/offline_translation_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_service.dart';
 
@@ -29,6 +31,20 @@ class _SettingsPageState extends State<SettingsPage> {
   int _directoryRequest = 0;
   int _testRequest = 0;
 
+  // ---- [G4.4] 离线翻译状态 ----
+  /// null = 尚未探测完成(区块显示加载中)。
+  bool? _offlineAvailable;
+  String? _offlineReason;
+
+  /// 已导入到私有目录的模型组 id。
+  List<String> _importedGroups = const [];
+  bool _offlineBusy = false;
+
+  /// 试译读数(耗时 + 译文), 供 G4.4 评测速度与质量。
+  String? _probeResult;
+  int _offlineRequest = 0;
+  late TextEditingController _probeCtrl;
+
   late TextEditingController _baseCtrl;
   late TextEditingController _keyCtrl;
   late TextEditingController _modelCtrl;
@@ -39,8 +55,39 @@ class _SettingsPageState extends State<SettingsPage> {
     _baseCtrl = TextEditingController();
     _keyCtrl = TextEditingController();
     _modelCtrl = TextEditingController();
+    _probeCtrl = TextEditingController(text: '这是一个测试句子。');
     _load();
     _loadVersion();
+    _probeOffline();
+  }
+
+  /// [G4.4] 探测离线翻译可用性与已导入模型组。
+  ///
+  /// 失败一律落到「不可用 + 原因」, 不抛到 UI —— 探测本身失败与
+  /// 「设备不支持」对用户是同一件事: 离线用不了。
+  Future<void> _probeOffline() async {
+    final request = ++_offlineRequest;
+    try {
+      final available = await OfflineTranslationService.isAvailable();
+      final reason = available
+          ? null
+          : await OfflineTranslationService.unavailableReason();
+      final groups = available
+          ? await OfflineTranslationService.importedGroups()
+          : const <String>[];
+      if (!mounted || request != _offlineRequest) return;
+      setState(() {
+        _offlineAvailable = available;
+        _offlineReason = reason;
+        _importedGroups = groups;
+      });
+    } catch (e) {
+      if (!mounted || request != _offlineRequest) return;
+      setState(() {
+        _offlineAvailable = false;
+        _offlineReason = '探测失败:$e';
+      });
+    }
   }
 
   /// [v2.6.0] 读取运行时版本号(版本名),显示在页面底部;失败则保留默认值。
@@ -77,6 +124,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   void dispose() {
+    _probeCtrl.dispose();
     _baseCtrl.dispose();
     _keyCtrl.dispose();
     _modelCtrl.dispose();
@@ -277,6 +325,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
           // [v2.4.0] 移除: 翻译方式 SwitchListTile(ML Kit 已删除)
 
+          // [G4.4] 离线翻译(slimt)。与 v2.4.0 移除的 ML Kit 无关, 是另一套引擎。
+          ..._offlineSection(),
+
           _sectionTitle('朗读参数'),
           _slider(
             '常规模式·语速(部分引擎偏慢可调至 300%)',
@@ -454,6 +505,207 @@ class _SettingsPageState extends State<SettingsPage> {
     final ok =
         await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
     if (!ok && mounted) _toast('无法打开链接,请手动访问:$url');
+  }
+
+  // ---------------- [G4.4] 离线翻译 ----------------
+
+  /// 离线翻译区块。返回 List 以便在 ListView 里用展开运算符插入。
+  List<Widget> _offlineSection() {
+    final available = _offlineAvailable;
+    return [
+      _sectionTitle('离线翻译(实验)'),
+      if (available == null)
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 8),
+          child: Row(children: [
+            SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 12),
+            Text('检测中…', style: TextStyle(color: Colors.grey)),
+          ]),
+        )
+      else ...[
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: _s.preferOfflineTranslation && available,
+          // 不可用时置灰而非隐藏: 让用户知道有这个能力、以及为何用不了。
+          onChanged: available
+              ? (v) => setState(() => _s.preferOfflineTranslation = v)
+              : null,
+          title: const Text('优先使用离线翻译'),
+          subtitle: Text(
+            available
+                ? '不联网、不耗 API 额度。模型未覆盖的语向会自动改用在线翻译。'
+                : (_offlineReason ?? '当前设备不支持'),
+            style: TextStyle(
+              fontSize: 12,
+              color: available ? Colors.grey : Colors.orange.shade800,
+            ),
+          ),
+        ),
+        if (available) ...[
+          const SizedBox(height: 4),
+          Text(
+            _importedGroups.isEmpty
+                ? '尚未导入模型。需先下载 Firefox Translations 模型文件到手机，'
+                    '再选择所在目录导入(会复制进应用私有目录)。'
+                : '已导入:${_importedGroups.map(_groupLabel).join('、')}',
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _offlineBusy ? null : _importOfflineModels,
+                icon: _offlineBusy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.drive_folder_upload),
+                label: Text(_offlineBusy ? '导入中…' : '选择模型目录'),
+              ),
+              for (final id in _importedGroups)
+                OutlinedButton.icon(
+                  onPressed:
+                      _offlineBusy ? null : () => _deleteOfflineGroup(id),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: Text('删除 ${_groupLabel(id)}'),
+                ),
+            ],
+          ),
+          if (_importedGroups.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            // 试译入口: G4.4 要测速度与质量, 没有读数就只能靠手感。
+            TextField(
+              controller: _probeCtrl,
+              maxLines: 2,
+              minLines: 1,
+              decoration: const InputDecoration(
+                labelText: '试译(中↔英自动判向)',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
+              OutlinedButton.icon(
+                onPressed: _offlineBusy ? null : _probeTranslate,
+                icon: const Icon(Icons.translate),
+                label: const Text('离线试译'),
+              ),
+            ]),
+            if (_probeResult != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: SelectableText(
+                  _probeResult!,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+            ],
+          ],
+        ],
+      ],
+      const Divider(height: 40),
+    ];
+  }
+
+  /// 语向 id 的可读形式，如 `zhen` → `中→英`。
+  String _groupLabel(String id) {
+    const labels = {'zhen': '中→英', 'enzh': '英→中'};
+    return labels[id] ?? id;
+  }
+
+  /// 选目录 → 扫描 → 逐组导入。
+  Future<void> _importOfflineModels() async {
+    setState(() => _offlineBusy = true);
+    try {
+      final treeUri = await OfflineTranslationService.pickModelDirectory();
+      if (treeUri == null) return; // 用户取消
+      final groups = await OfflineTranslationService.scanModels(treeUri);
+      if (groups.isEmpty) {
+        _toast('该目录下没有找到成组的模型文件');
+        return;
+      }
+      for (final g in groups.where((g) => g.isComplete)) {
+        await OfflineTranslationService.importModel(treeUri, g.id);
+      }
+      // 记住授权目录, 下次免重选。
+      _s = _s.copyWith(offlineModelTreeUri: treeUri);
+      await _service.save(_s);
+      // 导入会改变可加载集合, 让协调器重新与原生侧对齐。
+      OfflineTranslationCoordinator.instance.invalidate();
+      final imported = await OfflineTranslationService.importedGroups();
+      if (!mounted) return;
+      setState(() => _importedGroups = imported);
+      _toast('已导入 ${imported.map(_groupLabel).join('、')}');
+    } catch (e) {
+      _toast('导入失败:$e');
+    } finally {
+      if (mounted) setState(() => _offlineBusy = false);
+    }
+  }
+
+  Future<void> _deleteOfflineGroup(String id) async {
+    setState(() => _offlineBusy = true);
+    try {
+      await OfflineTranslationService.deleteGroup(id);
+      // 原生侧 deleteGroup 会先卸载再删文件; 协调器若还记着「已加载」,
+      // 下次翻译会跳过加载直接翻, 必然失败。
+      OfflineTranslationCoordinator.instance.invalidate();
+      final imported = await OfflineTranslationService.importedGroups();
+      if (!mounted) return;
+      setState(() {
+        _importedGroups = imported;
+        _probeResult = null;
+      });
+    } catch (e) {
+      _toast('删除失败:$e');
+    } finally {
+      if (mounted) setState(() => _offlineBusy = false);
+    }
+  }
+
+  /// 试译并显示耗时 —— G4.4 的速度读数来源。
+  Future<void> _probeTranslate() async {
+    final text = _probeCtrl.text.trim();
+    if (text.isEmpty) {
+      _toast('请先输入要翻译的文字');
+      return;
+    }
+    setState(() {
+      _offlineBusy = true;
+      _probeResult = null;
+    });
+    try {
+      final outcome =
+          await OfflineTranslationCoordinator.instance.translate(text);
+      if (!mounted) return;
+      setState(() {
+        _probeResult = outcome == null
+            ? '没有匹配该语向的模型(已导入:'
+                '${_importedGroups.map(_groupLabel).join('、')})'
+            : '[${_groupLabel(outcome.groupId)}] '
+                '${outcome.elapsed.inMilliseconds} ms\n${outcome.text}';
+      });
+    } catch (e) {
+      // PoC 阶段离线错误必须可见: 静默回落会让「离线没跑起来」
+      // 伪装成「离线跑了但质量一般」, 两者排查方向完全相反。
+      if (mounted) setState(() => _probeResult = '离线翻译失败:$e');
+    } finally {
+      if (mounted) setState(() => _offlineBusy = false);
+    }
   }
 
   Widget _sectionTitle(String t) => Padding(

@@ -23,6 +23,10 @@ class AppSettings {
 
   // [v2.4.0] 移除: preferOfflineTranslation(ML Kit 已删除,纯在线翻译)
 
+  // [G4.4] 离线翻译(slimt)。与 v2.4.0 移除的 ML Kit 无关, 是另一套引擎。
+  bool preferOfflineTranslation; // 开启后优先离线, 不可用/失败静默回落在线
+  String? offlineModelTreeUri; // SAF 授权的模型目录 URI(持久授权, 免重选)
+
   // 朗读参数
   int repeatCount; // 听写:每词重复遍数(1~10)
   double dictationGapSeconds; // 听写:词间停顿(秒,0.5~10)
@@ -41,6 +45,8 @@ class AppSettings {
     this.apiKey = '',
     this.model = 'gpt-4o-mini',
     // [v2.4.0] 移除 preferOfflineTranslation
+    this.preferOfflineTranslation = false,
+    this.offlineModelTreeUri,
     this.repeatCount = 2,
     this.dictationGapSeconds = 2.0,
     this.repeatGapSeconds = 0.6,
@@ -61,6 +67,8 @@ class AppSettings {
     String? baseUrl,
     String? apiKey,
     String? model,
+    bool? preferOfflineTranslation,
+    String? offlineModelTreeUri,
     int? repeatCount,
     double? dictationGapSeconds,
     double? repeatGapSeconds,
@@ -71,11 +79,19 @@ class AppSettings {
     AudioFormat? audioFormat,
     String? customOutputDir,
     bool clearCustomOutputDir = false,
+    // [G4.4] 与 clearCustomOutputDir 同理: offlineModelTreeUri 可空,
+    // 传 null 表示「不改」, 要真正清除授权必须走这个标志。
+    bool clearOfflineModelTreeUri = false,
   }) =>
       AppSettings(
         baseUrl: baseUrl ?? this.baseUrl,
         apiKey: apiKey ?? this.apiKey,
         model: model ?? this.model,
+        preferOfflineTranslation:
+            preferOfflineTranslation ?? this.preferOfflineTranslation,
+        offlineModelTreeUri: clearOfflineModelTreeUri
+            ? null
+            : offlineModelTreeUri ?? this.offlineModelTreeUri,
         repeatCount: repeatCount ?? this.repeatCount,
         dictationGapSeconds: dictationGapSeconds ?? this.dictationGapSeconds,
         repeatGapSeconds: repeatGapSeconds ?? this.repeatGapSeconds,
@@ -96,6 +112,10 @@ class SettingsService {
   static const _kApiKey = 'cfg_api_key';
   static const _kModel = 'cfg_model';
   // [v2.4.0] 移除: _kPreferOfflineTr
+  // [G4.4] 键名与 v2.4.0 移除的那个刻意不同 —— 旧键可能残留在老用户的
+  // SharedPreferences 里, 复用会读到 ML Kit 时代的语义。
+  static const _kPreferOfflineSlimt = 'cfg_prefer_offline_slimt';
+  static const _kOfflineTreeUri = 'cfg_offline_tree_uri';
   static const _kRepeat = 'cfg_repeat';
   static const _kDictGap = 'cfg_dict_gap';
   static const _kRepeatGap = 'cfg_repeat_gap';
@@ -114,6 +134,9 @@ class SettingsService {
       apiKey: p.getString(_kApiKey) ?? def.apiKey,
       model: p.getString(_kModel) ?? def.model,
       // [v2.4.0] 移除: preferOfflineTranslation
+      preferOfflineTranslation:
+          p.getBool(_kPreferOfflineSlimt) ?? def.preferOfflineTranslation,
+      offlineModelTreeUri: p.getString(_kOfflineTreeUri),
       repeatCount: p.getInt(_kRepeat) ?? def.repeatCount,
       dictationGapSeconds: p.getDouble(_kDictGap) ?? def.dictationGapSeconds,
       repeatGapSeconds: p.getDouble(_kRepeatGap) ?? def.repeatGapSeconds,
@@ -157,6 +180,19 @@ class SettingsService {
     await require(p.setDouble(_kDictRate, s.dictationRate));
     await require(p.setBool(_kAutoExport, s.autoExportAudio));
     await require(p.setString(_kAudioFmt, s.audioFormat.name));
+    await require(
+      p.setBool(_kPreferOfflineSlimt, s.preferOfflineTranslation),
+    );
+    // [G4.4] 可空字段, 写法与下方 customOutputDir 一致:
+    // remove 返回 false 且键仍在才算真失败(键本就不存在时 remove 也返回 false)。
+    if (s.offlineModelTreeUri == null) {
+      if (!await p.remove(_kOfflineTreeUri) &&
+          p.containsKey(_kOfflineTreeUri)) {
+        throw Exception('设置保存失败');
+      }
+    } else {
+      await require(p.setString(_kOfflineTreeUri, s.offlineModelTreeUri!));
+    }
     if (s.customOutputDir == null) {
       if (!await p.remove(_kOutDir) && p.containsKey(_kOutDir)) {
         throw Exception('设置保存失败');

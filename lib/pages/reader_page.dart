@@ -17,7 +17,8 @@ import '../services/vision_ocr_service.dart';
 // [G2] 已 vendoring 到本仓库, 不再走 pub 依赖: 点击朗读需要上游未暴露的
 // onTap / onDraw(详见 lib/vendor/flutter_pdfview/flutter_pdfview.dart)
 import '../vendor/flutter_pdfview/flutter_pdfview.dart';
-// [v2.4.0] 移除: offline_translation_service(ML Kit 已删除)
+// [G4.4] 离线翻译(slimt)。与 v2.4.0 移除的 ML Kit 翻译无关, 是另一套引擎。
+import '../services/offline_translation_coordinator.dart';
 
 class ReaderPage extends StatefulWidget {
   final Document document;
@@ -438,8 +439,12 @@ class _ReaderPageState extends State<ReaderPage> {
       return;
     }
 
-    // 在线翻译前置检查
-    if (!_settings.translationReady) {
+    // [G4.4] 离线优先。前置检查放在离线之后:离线可用时不该被
+    // 「没配在线 API」挡住 —— 那是在线通道的前提, 不是离线的。
+    final bool offlineFirst = _settings.preferOfflineTranslation &&
+        await OfflineTranslationCoordinator.instance.isUsable();
+
+    if (!offlineFirst && !_settings.translationReady) {
       _toast('请先到「设置」配置翻译 API');
       return;
     }
@@ -448,8 +453,31 @@ class _ReaderPageState extends State<ReaderPage> {
     final revision = _contentRevision;
     setState(() => _translating = true);
     try {
-      final result =
-          await _translation.translate(sentence, settings: _settings);
+      String? result;
+      if (offlineFirst) {
+        try {
+          final outcome =
+              await OfflineTranslationCoordinator.instance.translate(sentence);
+          // outcome == null: 没有覆盖该语向的模型 —— 属正常情况, 转在线。
+          result = outcome?.text;
+        } catch (_) {
+          // 静默回落在线, 与既有在线行为一致(设置页的试译入口会显示
+          // 真实错误, 排查靠那里, 不在阅读流程里弹错打断用户)。
+          result = null;
+        }
+      }
+      // 离线未出结果 → 回落在线; 若在线也没配好, 只能如实告知。
+      if (result == null) {
+        if (!_settings.translationReady) {
+          if (mounted && request == _translationRequest) {
+            _toast('离线模型未覆盖该语向,请到「设置」配置翻译 API');
+          }
+          return;
+        }
+        result = await _translation.translate(sentence, settings: _settings);
+      }
+      // 提到局部 final: 闭包里用可空变量拿不到类型提升。
+      final translated = result;
       if (!mounted ||
           request != _translationRequest ||
           revision != _contentRevision ||
@@ -457,7 +485,7 @@ class _ReaderPageState extends State<ReaderPage> {
           _tts.tokens[index] != sentence) {
         return;
       }
-      setState(() => _translations[index] = result);
+      setState(() => _translations[index] = translated);
       _sheetRebuild?.call();
     } catch (e) {
       if (mounted && request == _translationRequest) {

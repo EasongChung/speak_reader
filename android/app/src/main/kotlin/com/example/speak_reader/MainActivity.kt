@@ -185,6 +185,18 @@ class MainActivity : FlutterActivity() {
 
                     "importedGroups" -> result.success(ModelImporter.importedGroups(this))
 
+                    // [G4.4] 取已导入模型组的真实路径, 不需要 SAF 授权 ——
+                    // 文件已在私有目录, 加载时再要求重新授权目录没有道理。
+                    // 返回空 Map 表示未导入或文件不全, 由 Dart 侧判定。
+                    "importedPaths" -> {
+                        val groupId = call.argument<String>("groupId")
+                        if (groupId.isNullOrEmpty()) {
+                            result.error("bad_args", "groupId is required", null)
+                            return@setMethodCallHandler
+                        }
+                        result.success(ModelImporter.importedPaths(this, groupId))
+                    }
+
                     "deleteGroup" -> {
                         val groupId = call.argument<String>("groupId")
                         if (groupId.isNullOrEmpty()) {

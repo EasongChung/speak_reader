@@ -29,6 +29,12 @@ class OfflineModelGroup {
     );
   }
 
+  /// 是否可加载：必须同时有权重与词表。
+  ///
+  /// shortlist 是可选项，缺了只影响速度不影响能否工作，故不计入。
+  /// 与原生侧 `ModelImporter.import` 的判据一致（那里缺这两样会抛异常）。
+  bool get isComplete => modelName.isNotEmpty && vocabularyName.isNotEmpty;
+
   /// 语向的可读形式，如 `zhen` → `中文 → 英文`；无法识别时回退 id 本身。
   String get displayName {
     if (id.length != 4) return id;
@@ -151,6 +157,22 @@ class OfflineTranslationService {
   static Future<List<String>> importedGroups() async {
     final raw = await _channel.invokeMethod<List<Object?>>('importedGroups');
     return raw?.whereType<String>().toList() ?? const [];
+  }
+
+  /// [G4.4] 取已导入模型组在私有目录中的真实路径。
+  ///
+  /// 与 [importModel] 的区别：本方法**不需要 treeUri**，不碰 SAF。已导入的
+  /// 文件就在 app 私有目录里，加载时要求用户重新授权目录是没有道理的 ——
+  /// 授权可能早已被系统回收，而文件仍然好好地在那儿。
+  ///
+  /// 返回空 Map 表示未导入或文件不全（不抛异常：「没导入」是正常状态）。
+  static Future<Map<String, String>> importedPaths(String groupId) async {
+    final raw = await _channel.invokeMethod<Map<Object?, Object?>>(
+      'importedPaths',
+      {'groupId': groupId},
+    );
+    if (raw == null) return const {};
+    return raw.map((k, v) => MapEntry(k as String, (v as String?) ?? ''));
   }
 
   /// 删除已导入的模型组（会先卸载再删文件）。

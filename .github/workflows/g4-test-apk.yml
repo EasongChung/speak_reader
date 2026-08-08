@@ -1,0 +1,202 @@
+name: G4 Test APK (offline translate)
+
+# [G4.4] G4 离线翻译分支的**测试版**打包线，与 main 的正式线 build-apk.yml 完全隔离：
+#
+#   * 版本号走独立的测试编号 `2.6.0-g4test.N`（N = 已发布测试版数 +1），
+#     标签前缀 `g4test-`，不占用 `v2.5.*` 命名空间 —— 正式线计算版本号时用的是
+#     `git tag -l 'v2.5.*'`，前缀不同才不会被本线的标签污染成跳版。
+#   * Release 一律 `prerelease: true`，避免顶掉正式版的 Latest 标记。
+#
+# ⚠️ versionCode 从 900 起算（正式线是 2.5.x 的末位，即两位数）。测试版因此
+# 恒高于正式版，装过测试版的机器要回正式版必须先卸载 —— Android 不允许
+# versionCode 降级安装。这是刻意的取舍：测试版之间必须能反复覆盖安装。
+on:
+  workflow_dispatch:
+  push:
+    branches: [g4-offline-translate]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # 需要全量 tags 来计算本次测试版编号
+          fetch-depth: 0
+
+      - name: 安装 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: 安装 Flutter 3.29.3
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.3'
+          channel: stable
+          cache: true
+
+      # [G4.4] 前置门禁：.so 必须先在仓库里，否则打出的 APK 缺原生库，
+      # 运行时 loadLibrary 失败 → 静默回落在线 → 表象是「离线翻译没生效」，
+      # 而真因在打包阶段。这种错必须在构建期拦下，不能留到真机上猜。
+      - name: 校验 jniLibs 中的 slimt 原生库
+        shell: bash
+        run: |
+          set -euo pipefail
+          SO="android/app/src/main/jniLibs/arm64-v8a/libslimt_jni.so"
+          if [ ! -f "$SO" ]; then
+            echo "::error::缺少 $SO —— G4.3 产物未入库，打出的 APK 无法离线翻译"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$SO")
+          echo "libslimt_jni.so 大小: ${SIZE} 字节"
+          # G4.3 实测 3,794,096 字节。放宽到 3MB 下限即可识别「空文件/LFS 指针占位」。
+          if [ "$SIZE" -lt 3000000 ]; then
+            echo "::error::$SO 仅 ${SIZE} 字节，疑似占位文件或 LFS 指针"
+            exit 1
+          fi
+          # ELF 魔数 + class 2(64位) + machine 183(aarch64) 三项一起判，
+          # 单看魔数无法区分误放了 x86_64 版本。
+          HEAD_HEX=$(head -c 20 "$SO" | od -An -tx1 | tr -d ' \n')
+          case "$HEAD_HEX" in
+            7f454c4602*) ;;
+            *) echo "::error::$SO 不是 64 位 ELF (前缀 $HEAD_HEX)"; exit 1 ;;
+          esac
+          MACHINE=$(od -An -tu2 -j18 -N2 "$SO" | tr -d ' \n')
+          if [ "$MACHINE" != "183" ]; then
+            echo "::error::$SO e_machine=${MACHINE}，不是 aarch64(183)"
+            exit 1
+          fi
+          echo "原生库校验通过：64 位 ELF / aarch64"
+
+      # 测试版编号独立计数：取已发布最大 g4test-<N> 自动 +1（无则 1）。
+      # 不改 pubspec —— 与正式线同理，改了会形成 push→构建→push 的循环。
+      - name: 计算测试版编号
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAX=$(git tag -l 'g4test-*' | sed -E 's/^g4test-([0-9]+).*/\1/' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+          if [ -z "$MAX" ]; then MAX=0; fi
+          N=$((MAX + 1))
+          echo "BUILD_N=${N}" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=2.6.0-g4test.${N}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$((900 + N))" >> "$GITHUB_ENV"
+          echo "本次测试版: 2.6.0-g4test.${N} (versionCode $((900 + N)))"
+
+      - name: 按锁文件获取依赖
+        run: flutter pub get
+
+      - name: 检查 Dart 格式
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: 静态分析
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: 运行测试
+        run: flutter test
+
+      # 复用正式线同一 keystore：applicationId 相同，签名一致才能与正式版
+      # 互相覆盖安装。Secrets 未配置时回落到自动生成（此时无法覆盖正式版）。
+      - name: 配置签名 keystore
+        run: |
+          mkdir -p $HOME/.android
+          if echo "${{ secrets.KEYSTORE_BASE64 }}" | grep -q '.'; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > $HOME/.android/speak-reader-keystore.jks
+            echo "KEYSTORE_PATH=$HOME/.android/speak-reader-keystore.jks" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "Keystore restored from secrets"
+          else
+            echo "::warning::未配置 KEYSTORE_BASE64，将用临时签名，无法覆盖安装正式版"
+          fi
+
+      - name: 构建 arm64 Release APK
+        # 注意: 不得使用反斜杠续行, YAML 普通标量会把换行折成空格,
+        # 导致 bash 把 '\ --build-name' 解析为带前导空格的字面参数而失败。
+        run: flutter build apk --release --target-platform android-arm64 --build-name "$VERSION_NAME" --build-number "$VERSION_CODE"
+        env:
+          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
+          KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+
+      # [G4.4] 后置门禁：APK 内必须真的含 libslimt_jni.so。
+      # 前面只校验了源目录 —— jniLibs 路径写错、ABI 过滤把它筛掉、
+      # 打包插件没收录，都会让源目录有而 APK 里没有。这两处必须分别判。
+      - name: 校验 APK 内含原生库并重命名
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE="build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$SOURCE"
+          test -n "$VERSION_NAME"
+          ENTRY=$(unzip -l "$SOURCE" | grep 'lib/arm64-v8a/libslimt_jni.so' || true)
+          if [ -z "$ENTRY" ]; then
+            echo "::error::APK 内缺少 lib/arm64-v8a/libslimt_jni.so，离线翻译必然不可用"
+            unzip -l "$SOURCE" | grep 'lib/' || echo "(APK 内无任何 lib/ 条目)"
+            exit 1
+          fi
+          echo "APK 内原生库: $ENTRY"
+          DEST="build/app/outputs/flutter-apk/speak-reader-${VERSION_NAME}-${GITHUB_SHA::7}-arm64-v8a.apk"
+          mv "$SOURCE" "$DEST"
+          echo "APK_PATH=${DEST}" >> "$GITHUB_ENV"
+          sha256sum "$DEST"
+          ls -lh "$DEST"
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: speak-reader-g4test-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/speak-reader-*-arm64-v8a.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 创建并推送测试版标签
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$BUILD_N"
+          TS="$(date -u '+%Y%m%d-%H%M%S')"
+          TAG="g4test-${BUILD_N}-${TS}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git tag -f "${TAG}"
+          git push origin "refs/tags/${TAG}" --force
+
+      # prerelease: true —— 测试版不得占据 Latest，否则正式用户下载页会拿到 PoC 包。
+      - name: 发布到 Releases（预发布）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "[测试版] Speak Reader ${{ env.VERSION_NAME }}"
+          body: |
+            ## G4 离线翻译测试版（非正式发布）
+
+            - 版本: `${{ env.VERSION_NAME }}` (versionCode `${{ env.VERSION_CODE }}`)
+            - 架构: arm64-v8a
+            - 分支: `${{ github.ref_name }}` @ `${{ github.sha }}`
+            - 构建日期: ${{ steps.tag.outputs.date }}
+            - 工作流: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### 用途
+            验证 slimt 离线翻译在真机上的可用性、质量与速度（G4.4）。
+
+            ### 使用须知
+            1. 离线翻译需 **Android 9 (API 28) 及以上**；更低版本该开关置灰，翻译走原在线链路。
+            2. 首次使用需在「设置 → 离线翻译」中导入模型目录（约 131MB，见
+               `models/firefox-translations/` 的 `fetch_models.sh` / `fetch_models.ps1`）。
+            3. 本包 versionCode 高于正式版，**装过本包后要装回正式版须先卸载**。
+          files: ${{ env.APK_PATH }}
+          draft: false
+          prerelease: true
