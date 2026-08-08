@@ -115,19 +115,21 @@ class OfflineTranslationService {
     return _reason ?? '离线翻译不可用';
   }
 
-  /// 打开系统目录选择器，返回授权目录的 URI 字符串；用户取消返回 null。
+  /// 打开系统文件选择器选模型包（zip），返回文件 URI 字符串；用户取消返回 null。
   ///
-  /// 授权是持久的（原生侧已 takePersistableUriPermission），URI 应由调用方
-  /// 存进设置，下次直接 [scanModels] 无需重新选择。
-  static Future<String?> pickModelDirectory() async {
-    return _channel.invokeMethod<String>('pickModelDirectory');
+  /// zip 是一次性读取（解压后即复制进私有目录），无需持久授权。
+  static Future<String?> pickModelZip() async {
+    return _channel.invokeMethod<String>('pickModelZip');
   }
 
-  /// 扫描已授权目录中成组的模型文件。只扫一层，不递归。
-  static Future<List<OfflineModelGroup>> scanModels(String treeUri) async {
+  /// 导入 zip 模型包：解压并按文件名归类进 app 私有目录。
+  ///
+  /// 返回已导入的组列表（每项含 id / 各文件名 / hasShortlist）。
+  /// 空 zip 或无完整组时原生侧返回空列表，由调用方判定。
+  static Future<List<OfflineModelGroup>> importModelZip(String zipUri) async {
     final raw = await _channel.invokeMethod<List<Object?>>(
-      'scanModels',
-      {'treeUri': treeUri},
+      'importModelZip',
+      {'zipUri': zipUri},
     );
     if (raw == null) return const [];
     return raw
@@ -135,22 +137,6 @@ class OfflineTranslationService {
         .map(OfflineModelGroup.fromMap)
         .where((g) => g.id.isNotEmpty)
         .toList();
-  }
-
-  /// 把模型组复制进 app 私有目录，返回各文件的真实路径。
-  ///
-  /// 复制是必须的：slimt 用 mmap 读真实路径，不认 `content://` URI。
-  /// 已存在同名文件则跳过复制。
-  static Future<Map<String, String>> importModel(
-    String treeUri,
-    String groupId,
-  ) async {
-    final raw = await _channel.invokeMethod<Map<Object?, Object?>>(
-      'importModel',
-      {'treeUri': treeUri, 'groupId': groupId},
-    );
-    if (raw == null) throw Exception('导入模型失败：原生侧返回空结果');
-    return raw.map((k, v) => MapEntry(k as String, (v as String?) ?? ''));
   }
 
   /// 已导入到私有目录的模型组 id。
@@ -161,9 +147,8 @@ class OfflineTranslationService {
 
   /// [G4.4] 取已导入模型组在私有目录中的真实路径。
   ///
-  /// 与 [importModel] 的区别：本方法**不需要 treeUri**，不碰 SAF。已导入的
-  /// 文件就在 app 私有目录里，加载时要求用户重新授权目录是没有道理的 ——
-  /// 授权可能早已被系统回收，而文件仍然好好地在那儿。
+  /// 不碰 SAF：已导入的文件就在 app 私有目录里，加载时要求用户重新授权
+  /// 是没有道理的 —— 授权可能早已被系统回收，而文件仍然好好地在那儿。
   ///
   /// 返回空 Map 表示未导入或文件不全（不抛异常：「没导入」是正常状态）。
   static Future<Map<String, String>> importedPaths(String groupId) async {

@@ -2,9 +2,10 @@ package com.example.speak_reader
 
 import android.content.Context
 import android.net.Uri
-import android.provider.DocumentsContract
 import android.util.Log
+import java.io.BufferedInputStream
 import java.io.File
+import java.util.zip.ZipInputStream
 
 /**
  * `G4.3` 从外部存储导入 slimt 模型文件。
@@ -15,12 +16,16 @@ import java.io.File
  * 不认 Android 的 `content://` URI。所以外部存储的模型无论用哪种权限方案,
  * 都必须先复制到 app 私有目录才能加载 —— 没有「引用直达」这条路。
  *
- * ## 为什么用 SAF 而不是 MediaStore 扫 Download
+ * ## 为什么用 SAF 文件选择器选 zip
  *
- * `docs/13` §G4.3(2026-08-07 用户确认方案 1): SAF **零权限声明**, 用户通过
- * 系统目录选择器授权一次, 之后持久可读; 且 API 21+ 行为一致, 不必处理
- * 分区存储在 28 / 29+ / 31+ 的三套规则。MediaStore 方案在 API 28 上仍需
- * `READ_EXTERNAL_STORAGE` 运行时弹窗, 且要写两套代码路径。
+ * `docs/13` §G4.3(2026-08-07 用户确认方案 1): SAF **零权限声明**, 且 API 21+
+ * 行为一致, 不必处理分区存储在 28 / 29+ / 31+ 的三套规则。MediaStore 方案
+ * 在 API 28 上仍需 `READ_EXTERNAL_STORAGE` 运行时弹窗, 且要写两套代码路径。
+ *
+ * 分发形态是**按语向分别打包**的 zip(见 `models/firefox-translations` 目录的
+ * MANIFEST.json): 用户下载所需语向的 zip 后, 在此经系统文件选择器选中,
+ * [importZip] 解压并把文件按语向归类到私有目录。zip 是一次性读取,
+ * 不需要 `takePersistableUriPermission`。
  *
  * ## 模型组识别
  *
@@ -45,11 +50,13 @@ object ModelImporter {
      * 刻意用 Map 而非 data class 跨 MethodChannel 传递: Flutter 的
      * StandardMessageCodec 只认基本类型与集合, 且 data class 在 release
      * 构建下有被 Proguard 裁剪的风险(docs/13 §G4.3 记录的坑)。
+     *
+     * [model]/[vocabulary]/[shortlist] 存 (文件名, 私有目录绝对路径)。
      */
     private class ModelGroup(val id: String) {
-        var model: Pair<String, Uri>? = null
-        var vocabulary: Pair<String, Uri>? = null
-        var shortlist: Pair<String, Uri>? = null
+        var model: Pair<String, String>? = null
+        var vocabulary: Pair<String, String>? = null
+        var shortlist: Pair<String, String>? = null
 
         /** shortlist 是可选项, 模型与词表缺一不可。 */
         val isComplete: Boolean
@@ -65,119 +72,64 @@ object ModelImporter {
     }
 
     /**
-     * 扫描 [treeUri] 指向的目录, 返回其中成组的模型文件。
+     * 从 zip 模型包解压并导入模型组。
      *
-     * 只扫一层, 不递归: 模型文件通常与下载位置同级平铺, 递归会在用户误选
-     * 整个存储根目录时扫出成千上万个文件。
+     * zip 是**按语向分别打包**的(见 MANIFEST.json): 每个 zip 内含一个语向的
+     * 三件套(model/vocab/lex, 可能带该语向的子目录)。本方法遍历 zip 条目,
+     * 跳过目录与 `.gz`, 用 [classify] 按文件名识别类别与语向, 写入私有目录
+     * `offline_models/<groupId>/`。
      *
-     * 返回的每项含 id / 各文件名 / hasShortlist, 供 Dart 侧列表展示。
+     * 返回已导入的组列表(每项含 id / 各文件名 / hasShortlist), 供 Dart 侧
+     * 展示; 空 zip 或无可识别文件时返回空列表, 由调用方判定。
      */
-    fun scan(context: Context, treeUri: Uri): List<Map<String, Any>> {
+    fun importZip(context: Context, zipUri: Uri): List<Map<String, Any>> {
         val groups = LinkedHashMap<String, ModelGroup>()
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-            treeUri,
-            DocumentsContract.getTreeDocumentId(treeUri),
-        )
 
-        context.contentResolver.query(
-            childrenUri,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-            ),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                val documentId = cursor.getString(0) ?: continue
-                val name = cursor.getString(1) ?: continue
-                val mime = cursor.getString(2)
-                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
-
-                val kind = classify(name) ?: continue
-                val pair = kind.second to
-                    DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
-                val group = groups.getOrPut(kind.second) { ModelGroup(kind.second) }
-                // 同类文件重复出现时保留首个: 后者多为不同量化档的同名变体,
-                // 静默覆盖会让用户不清楚实际加载的是哪个。
-                when (kind.first) {
-                    Kind.MODEL -> if (group.model == null) group.model = name to pair.second
-                    Kind.VOCABULARY ->
-                        if (group.vocabulary == null) group.vocabulary = name to pair.second
-                    Kind.SHORTLIST ->
-                        if (group.shortlist == null) group.shortlist = name to pair.second
+        val input = context.contentResolver.openInputStream(zipUri)
+            ?: throw IllegalStateException("无法读取: $zipUri")
+        input.use { ins ->
+            ZipInputStream(BufferedInputStream(ins)).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val name = entry.name
+                    if (!entry.isDirectory) {
+                        // zip 内文件名可能带语向子目录前缀(如 en-zh/…), 取 basename 再分类
+                        val base = name.substringAfterLast('/')
+                        val kind = classify(base)
+                        if (kind != null) {
+                            val group = groups.getOrPut(kind.second) { ModelGroup(kind.second) }
+                            val dest = File(
+                                context.filesDir, "$MODELS_DIR/${kind.second}/$base",
+                            )
+                            writeEntry(zis, dest)
+                            when (kind.first) {
+                                Kind.MODEL ->
+                                    if (group.model == null) group.model = base to dest.absolutePath
+                                Kind.VOCABULARY ->
+                                    if (group.vocabulary == null)
+                                        group.vocabulary = base to dest.absolutePath
+                                Kind.SHORTLIST ->
+                                    if (group.shortlist == null)
+                                        group.shortlist = base to dest.absolutePath
+                            }
+                        }
+                    }
+                    entry = zis.nextEntry
                 }
             }
         }
 
         val complete = groups.values.filter { it.isComplete }
-        Log.i(TAG, "扫描到 ${groups.size} 组, 其中 ${complete.size} 组完整")
+        Log.i(TAG, "zip 内识别 ${groups.size} 组, 其中 ${complete.size} 组完整")
         return complete.map { it.toMap() }
     }
 
-    /**
-     * 把 [groupId] 对应的模型文件从 [treeUri] 复制进私有目录。
-     *
-     * 返回可直接传给 [SlimtBridge.load] 的真实路径; shortlist 缺失时为空串。
-     * 已存在同名文件则跳过复制 —— 模型文件动辄数十 MB, 重复导入会明显卡顿。
-     */
-    fun import(context: Context, treeUri: Uri, groupId: String): Map<String, String> {
-        val target = File(context.filesDir, "$MODELS_DIR/$groupId")
-        if (!target.exists() && !target.mkdirs()) {
-            throw IllegalStateException("无法创建模型目录: ${target.absolutePath}")
-        }
-
-        val result = hashMapOf("modelPath" to "", "vocabularyPath" to "", "shortlistPath" to "")
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-            treeUri,
-            DocumentsContract.getTreeDocumentId(treeUri),
-        )
-
-        context.contentResolver.query(
-            childrenUri,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-            ),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                val documentId = cursor.getString(0) ?: continue
-                val name = cursor.getString(1) ?: continue
-                if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) continue
-
-                val kind = classify(name) ?: continue
-                if (kind.second != groupId) continue
-
-                val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
-                val dest = File(target, name)
-                val key = when (kind.first) {
-                    Kind.MODEL -> "modelPath"
-                    Kind.VOCABULARY -> "vocabularyPath"
-                    Kind.SHORTLIST -> "shortlistPath"
-                }
-                // 已有同名文件且非空则复用。此处不做内容校验:
-                // 模型文件的完整性由 slimt 加载时报错兜底, 逐字节比对
-                // 数十 MB 的开销比重新复制还大。
-                if (dest.exists() && dest.length() > 0L) {
-                    if (result[key].isNullOrEmpty()) result[key] = dest.absolutePath
-                    continue
-                }
-                copy(context, uri, dest)
-                if (result[key].isNullOrEmpty()) result[key] = dest.absolutePath
-            }
-        }
-
-        if (result["modelPath"].isNullOrEmpty() || result["vocabularyPath"].isNullOrEmpty()) {
-            throw IllegalStateException("模型组 $groupId 缺少模型文件或词表")
-        }
-        Log.i(TAG, "模型组 $groupId 已导入至 ${target.absolutePath}")
-        return result
+    /** 把 zip 流的当前条目写入 [dest]; 已存在同名非空文件则跳过。 */
+    private fun writeEntry(zis: ZipInputStream, dest: File) {
+        if (dest.exists() && dest.length() > 0L) return  // 复用既有文件
+        val parent = dest.parentFile
+        if (parent != null && !parent.exists()) parent.mkdirs()
+        dest.outputStream().use { outs -> zis.copyTo(outs) }
     }
 
     /** 已导入到私有目录的模型组 id 列表。 */
@@ -190,12 +142,11 @@ object ModelImporter {
     /**
      * `G4.4` 取**已导入**模型组在私有目录中的真实路径。
      *
-     * 与 [import] 的区别: 本方法不碰 SAF, 不需要 treeUri。已导入的文件就在
-     * app 私有目录里, 加载时再要求用户重新授权目录是没有道理的 —— 授权可能
-     * 早已被系统回收, 而文件仍然好好地在那儿。
+     * 不碰 SAF: 已导入的文件就在 app 私有目录里, 加载时再要求用户重新授权
+     * 是没有道理的 —— 授权可能早已被系统回收, 而文件仍然好好地在那儿。
      *
      * 文件名不做假设(不同语向的文件名不同), 仍走 [classify] 识别类别,
-     * 与 [scan]/[import] 同源。目录不存在或缺必需文件时返回空 Map,
+     * 与 [importZip] 同源。目录不存在或缺必需文件时返回空 Map,
      * 由调用方判定 —— 这里不抛异常, 因为「没导入」是正常状态而非错误。
      */
     fun importedPaths(context: Context, groupId: String): Map<String, String> {
@@ -229,14 +180,6 @@ object ModelImporter {
         if (target.exists()) {
             target.deleteRecursively()
             Log.i(TAG, "已删除模型组 $groupId")
-        }
-    }
-
-    private fun copy(context: Context, source: Uri, dest: File) {
-        val input = context.contentResolver.openInputStream(source)
-            ?: throw IllegalStateException("无法读取: $source")
-        input.use { ins ->
-            dest.outputStream().use { outs -> ins.copyTo(outs, DEFAULT_BUFFER_SIZE) }
         }
     }
 

@@ -29,12 +29,13 @@ class MainActivity : FlutterActivity() {
     // [G4.3] 离线翻译通道: 原生库可用性判定 + SAF 模型导入 + 翻译
     private val offlineTranslateChannel = "com.example.speak_reader/offline_translate"
 
-    // [G4.3] SAF 目录选择的请求码。用 onActivityResult 而非 ActivityResultContracts:
-    // FlutterActivity 不是 ComponentActivity 的子类, 拿不到 registerForActivityResult。
-    private val pickModelDirRequest = 0x51A1
+    // [G4.3] SAF 模型包(zip)文件选择的请求码。用 onActivityResult 而非
+    // ActivityResultContracts: FlutterActivity 不是 ComponentActivity 的子类,
+    // 拿不到 registerForActivityResult。
+    private val pickModelZipRequest = 0x51A1
 
-    /** `G4.3` 目录选择结果回调; 选择器打开期间非 null。 */
-    private var pendingDirResult: MethodChannel.Result? = null
+    /** `G4.3` 文件选择结果回调; 选择器打开期间非 null。 */
+    private var pendingZipResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -134,49 +135,37 @@ class MainActivity : FlutterActivity() {
                     // 系统 API 级别, 供 UI 判断是否置灰开关。
                     "sdkInt" -> result.success(Build.VERSION.SDK_INT)
 
-                    // 打开 SAF 目录选择器。结果经 onActivityResult 异步回传。
-                    "pickModelDirectory" -> {
-                        if (pendingDirResult != null) {
-                            result.error("busy", "目录选择器已打开", null)
+                    // 打开 SAF 文件选择器选模型包(zip)。结果经 onActivityResult 异步回传。
+                    "pickModelZip" -> {
+                        if (pendingZipResult != null) {
+                            result.error("busy", "文件选择器已打开", null)
                             return@setMethodCallHandler
                         }
                         try {
-                            pendingDirResult = result
+                            pendingZipResult = result
                             startActivityForResult(
-                                Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
-                                pickModelDirRequest,
+                                Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                                    addCategory(Intent.CATEGORY_OPENABLE)
+                                    type = "application/zip"
+                                },
+                                pickModelZipRequest,
                             )
                         } catch (e: Exception) {
-                            pendingDirResult = null
+                            pendingZipResult = null
                             result.error("pick_failed", e.message, null)
                         }
                     }
 
-                    // 扫描已授权目录中的模型组。
-                    "scanModels" -> {
-                        val uriString = call.argument<String>("treeUri")
+                    // 解压 zip 模型包并导入私有目录, 返回已导入的组列表。
+                    "importModelZip" -> {
+                        val uriString = call.argument<String>("zipUri")
                         if (uriString.isNullOrEmpty()) {
-                            result.error("bad_args", "treeUri is required", null)
-                            return@setMethodCallHandler
-                        }
-                        try {
-                            result.success(ModelImporter.scan(this, Uri.parse(uriString)))
-                        } catch (e: Exception) {
-                            result.error("scan_failed", e.message, null)
-                        }
-                    }
-
-                    // 把模型组复制进私有目录, 返回可加载的真实路径。
-                    "importModel" -> {
-                        val uriString = call.argument<String>("treeUri")
-                        val groupId = call.argument<String>("groupId")
-                        if (uriString.isNullOrEmpty() || groupId.isNullOrEmpty()) {
-                            result.error("bad_args", "treeUri 与 groupId 均必填", null)
+                            result.error("bad_args", "zipUri 必填", null)
                             return@setMethodCallHandler
                         }
                         try {
                             result.success(
-                                ModelImporter.import(this, Uri.parse(uriString), groupId)
+                                ModelImporter.importZip(this, Uri.parse(uriString))
                             )
                         } catch (e: Exception) {
                             result.error("import_failed", e.message, null)
@@ -276,19 +265,20 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * `G4.3` 接收 SAF 目录选择结果。
+     * `G4.3` 接收 SAF 模型包(zip)文件选择结果。
      *
-     * 必须调 [takePersistableUriPermission], 否则授权在进程重启后失效,
-     * 下次扫描会静默返回空列表 —— 表现为「上次选好的目录突然没模型了」。
+     * zip 是一次性读取(解压后即复制进私有目录), 不需要
+     * `takePersistableUriPermission` —— 持久授权只对目录场景有意义,
+     * 文件场景授权随调用结束即失效, 不持久反而更安全。
      */
     @Deprecated("FlutterActivity 非 ComponentActivity, 无法用 ActivityResultContracts")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != pickModelDirRequest) return
+        if (requestCode != pickModelZipRequest) return
 
-        val callback = pendingDirResult ?: return
-        pendingDirResult = null
+        val callback = pendingZipResult ?: return
+        pendingZipResult = null
 
         val uri = data?.data
         if (resultCode != Activity.RESULT_OK || uri == null) {
@@ -296,15 +286,7 @@ class MainActivity : FlutterActivity() {
             callback.success(null)
             return
         }
-        try {
-            contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-            callback.success(uri.toString())
-        } catch (e: Exception) {
-            callback.error("persist_failed", e.message, null)
-        }
+        callback.success(uri.toString())
     }
 
     /// 用系统 PdfRenderer 把指定页渲染成 PNG 字节流; 页不存在返回 null。

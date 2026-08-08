@@ -194,8 +194,9 @@ jobs:
 
             ### 使用须知
             1. 离线翻译需 **Android 9 (API 28) 及以上**；更低版本该开关置灰，翻译走原在线链路。
-            2. 首次使用需在「设置 → 离线翻译」中导入模型目录（约 131MB，见
-               `models/firefox-translations/` 的 `fetch_models.sh` / `fetch_models.ps1`）。
+            2. 首次使用需在「设置 → 离线翻译」中导入模型包（zip，按语向分别打包，
+               每个约 45–50MB，见 `models/firefox-translations/` 的
+               `fetch_models.sh` / `fetch_models.ps1`）。
             3. 本包 versionCode 高于正式版，**装过本包后要装回正式版须先卸载**。
           files: ${{ env.APK_PATH }}
           draft: false

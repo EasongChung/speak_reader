@@ -87,8 +87,7 @@ class OfflineTranslationCoordinator {
     if (_loaded.contains(groupId)) return;
 
     // 导入过的模型在 app 私有目录里，走 importedPaths 直接取真实路径。
-    // 刻意不用 importModel —— 那个要 treeUri（SAF 授权），而授权可能早被
-    // 系统回收，文件却仍在。加载已导入的模型不该依赖目录授权还在。
+    // 刻意不重新导入 —— 加载已导入的模型不该依赖用户再次选择 zip。
     final paths = await OfflineTranslationService.importedPaths(groupId);
     final modelPath = paths['modelPath'] ?? '';
     final vocabularyPath = paths['vocabularyPath'] ?? '';

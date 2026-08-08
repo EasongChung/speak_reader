@@ -4,7 +4,7 @@
 Firefox Translations** 项目。
 
 > **模型权重不在仓库里。** 目录下只有清单、校验和与下载脚本;
-> 权重按需从下方三个源之一取回。原因见「为什么不入库」一节。
+> 权重按需从下方各源取回。原因见「为什么不入库」一节。
 
 ## 取模型
 
@@ -16,31 +16,32 @@ bash fetch_models.sh
 .\fetch_models.ps1
 ```
 
-脚本按 `MANIFEST.json` 里的优先级依次尝试各源,**每个文件下载后立即校验
-SHA-256**,校验不过就换下一个源;已存在且校验通过的文件直接跳过,
-故可重复执行、断点续跑。
+**按语向分别下载**: 每个语向一个 zip 包。默认下载全部语向, 可用
+`MODEL_GROUPS` 指定只取所需语向。每个语向先尝试整包, 失败回退逐文件上游。
+已存在且校验通过的文件直接跳过, 故可重复执行、断点续跑。
 
 ```bash
-bash fetch_models.sh /path/to/dir     # 指定目标目录
-VERIFY_ONLY=1 bash fetch_models.sh    # 只校验已有文件, 不下载
-sha256sum -c SHA256SUMS               # 手工校验(在本目录下执行)
+bash fetch_models.sh /path/to/dir            # 指定目标目录
+MODEL_GROUPS="zhen" bash fetch_models.sh     # 只下载指定语向(逗号分隔)
+VERIFY_ONLY=1 bash fetch_models.sh           # 只校验已有文件, 不下载
+sha256sum -c SHA256SUMS                      # 手工校验(在本目录下执行)
 ```
 
 ## 分发源
 
 | 优先级 | 源 | 说明 |
 |---|---|---|
-| 1 | 自有服务器 | `https://jiaguwengarm.easong.dpdns.org/bonsai/speak_reader/models/firefox-translations/` |
-| 2 | GitHub Release | tag `models-firefox-translations-v1` 的附件 |
-| 3 | 上游 | HF 镜像(zh-en)与 Mozilla GCS(en-zh),最终回退 |
+| 1 | GitHub Release | tag `models-firefox-translations-v1`,**按语向分别打包**,每个语向一个 zip(见 MANIFEST 各 group 的 archive 字段) |
+| 2 | 上游 | HF 镜像(zh-en)与 Mozilla GCS(en-zh),最终回退 |
 
-源 1、2 存 `.gz`(与上游分发形态一致),压缩后约 91 MB。
+Release 按语向分别打包: 每个语向一个 zip(内含该语向的解压后模型文件),
+下载所需语向解压即可导入。包名约定 `models-<name>-<dir>-v<version>.zip`。
 
 ## 文件
 
 ```
 firefox-translations/
-├── MANIFEST.json      清单: 字节数、SHA-256、三个源的 URL
+├── MANIFEST.json      清单: 字节数、SHA-256、各源 URL
 ├── SHA256SUMS         解压后文件的 SHA-256
 ├── fetch_models.sh    下载器(bash)
 ├── fetch_models.ps1   下载器(PowerShell)
@@ -94,15 +95,13 @@ GCS 这一版是单词表,才是可用的。
 - 模型不带附加限制,MPL-2.0 允许随产品分发。
 - MPL-2.0 要求对**修改过的文件**提供源代码;本项目分发的模型与上游
   **逐字节一致,未做任何修改**,故无此义务。
-- 自有服务器的分发目录同放了 `LICENSE-MPL-2.0.txt` 与写明出处的
+- Release 附件与上游同放了 `LICENSE-MPL-2.0.txt` 与写明出处的
   `README.txt`,满足再分发时随附许可声明的要求。
 
 ## SHA-256 校验
 
-以下为**解压后**文件的哈希,三个源通用。压缩包自身的哈希见
-`MANIFEST.json` 的 `sha256_gz` 字段——它只对自有源与 Release 的副本
-有效,上游的 `.gz` 是其自行压缩的产物,字节与我方不同(gzip 时间戳与
-压缩级别差异),但解压后内容一致。
+以下为**解压后**文件的哈希,各源通用。上游的 `.gz` 是其自行压缩的
+产物,字节与我方不同(gzip 时间戳与压缩级别差异),但解压后内容一致。
 
 | 文件 | SHA-256 |
 |---|---|

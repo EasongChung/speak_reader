@@ -569,7 +569,7 @@ jobs:
             echo "      乱码, 根因属 G4.4 已知风险项, 不是 JNI 写错。"
             echo "   2. Android 9 以下机型应静默走在线链路(SlimtBridge 判定),"
             echo "      设置页开关置灰并显示「需 Android 9 及以上」。"
-            echo "   3. 模型经 SAF 选目录导入, 会复制进 app 私有目录 ——"
+            echo "   3. 模型经 SAF 选 zip 模型包导入, 会解压进 app 私有目录 ——"
             echo "      slimt 用 mmap 读真实路径, 不认 content:// URI。"
           else
             echo "=> G4.2 未通过。备选路径(已按累计已排除项更新):"

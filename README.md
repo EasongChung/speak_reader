@@ -177,7 +177,7 @@ speak_reader/
   bash fetch_models.sh      # 或 Windows: .\fetch_models.ps1
   ```
 
-  脚本按「自有服务器 → GitHub Release → 上游」顺序回退,逐文件校验 SHA-256。
+  脚本按「GitHub Release → 上游」顺序回退,逐文件校验 SHA-256。
   未走 Git LFS 是因为免费额度耗尽会**停用仓库的 LFS 读写**导致 clone 直接
   失败,反而让下载兜底变成单点故障(详见该目录 README)。
 - **分发说明**:

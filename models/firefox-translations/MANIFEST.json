@@ -5,10 +5,10 @@
     "clone 消耗约 131 MB 流量(月配额仅够约 7 次)。额度耗尽时 GitHub 会**停用**",
     "该仓库的 LFS 读写而非自动计费, 届时 clone 会在 checkout 阶段直接失败 ——",
     "把模型放 LFS 会让「下载兜底」本身成为单点故障, 与入库初衷相反。",
-    "故改为: 仓库存清单 + 校验脚本, 二进制走 自有服务器 / GitHub Release 双源, 上游为最终回退。",
+    "故改为: 仓库存清单 + 校验脚本, 二进制走 GitHub Release 单一源, 上游为最终回退。",
     "",
-    "校验口径: sha256 一律为**解压后**文件的哈希, 三个源通用。",
-    "sha256_gz 仅对**自有源**(bonsai / release)的压缩包有效 —— 上游的 .gz 是",
+    "校验口径: sha256 一律为**解压后**文件的哈希, 各源通用。",
+    "sha256_gz 仅对 release 的压缩包有效 —— 上游的 .gz 是",
     "其自行压缩的产物, 字节与我方不同(gzip 时间戳/级别差异), 但解压后内容一致。"
   ],
   "name": "firefox-translations",
@@ -18,22 +18,14 @@
   "upstream_repo": "https://github.com/mozilla/firefox-translations-models",
   "sources": [
     {
-      "id": "bonsai",
-      "priority": 1,
-      "comment": "自有服务器, 首选。目录结构与本清单的 path 字段一一对应。",
-      "url_template": "https://jiaguwengarm.easong.dpdns.org/bonsai/speak_reader/models/firefox-translations/{path}.gz",
-      "verify_with": "sha256_gz"
-    },
-    {
       "id": "release",
-      "priority": 2,
-      "comment": "GitHub Release 附件(不计入 LFS 配额, 单文件上限 2 GB)。附件是扁平命名空间, 故用 name 而非 path; 六个文件名本身已含语向标识(zhen/enzh), 无冲突。",
-      "url_template": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/{name}.gz",
-      "verify_with": "sha256_gz"
+      "priority": 1,
+      "comment": "GitHub Release 附件(不计入 LFS 配额, 单文件上限 2 GB)。**按语向分别打包**: 每个语向一个 zip, 见各 group 的 archive 字段。包名约定: models-<name>-<dir>-v<version>.zip(dir 即语向目录, 如 zh-en/en-zh); 语向扩充(新增日/韩/俄对中)时各生成独立 zip, 包名天然区分。",
+      "verify_with": "sha256_zip"
     },
     {
       "id": "upstream",
-      "priority": 3,
+      "priority": 2,
       "comment": "上游权威出处, 最终回退。⚠️ 两个语向来源不同, 故 URL 逐文件写在 files[].upstream_url, 不用模板。上游 .gz 的字节哈希与我方不同, 只能按解压后 sha256 校验。",
       "verify_with": "sha256"
     }
@@ -45,6 +37,11 @@
       "direction": "中 → 英",
       "preset": "base",
       "vocab_layout": "single",
+      "archive": {
+        "name": "models-firefox-translations-zh-en-v1.zip",
+        "url": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/models-firefox-translations-zh-en-v1.zip",
+        "sha256_zip": "b2dac5fcfa01a4f910c05c02256da2e29aea7f9211bca9554224c8d5bd4f861c"
+      },
       "upstream": "Hugging Face 镜像 mukowaty/firefox-translations 的 zh-en/ 目录",
       "files": [
         {
@@ -85,6 +82,11 @@
       "direction": "英 → 中",
       "preset": "base",
       "vocab_layout": "single",
+      "archive": {
+        "name": "models-firefox-translations-en-zh-v1.zip",
+        "url": "https://github.com/EasongChung/speak_reader/releases/download/models-firefox-translations-v1/models-firefox-translations-en-zh-v1.zip",
+        "sha256_zip": "13df1a6345c3d57b16c2aeb8eaaea0cdb848f615b7493eae0eb8185e4032cf5a"
+      },
       "upstream": "Mozilla 官方 GCS 分发点 cjk_hplt2_lr0003_70x30_cF8zUnvoQluf7YmUggAnfg/exported/",
       "upstream_note": "⚠️ 刻意**不用** HF 镜像的 en-zh —— 那一版是 srcvocab/trgvocab 双词表, slimt 的 Package 只接受单个 vocabulary 字段(G4.1 实测)。GCS 这一版是单词表, 才是可用的。",
       "files": [

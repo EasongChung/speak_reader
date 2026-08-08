@@ -549,8 +549,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 4),
           Text(
             _importedGroups.isEmpty
-                ? '尚未导入模型。需先下载 Firefox Translations 模型文件到手机，'
-                    '再选择所在目录导入(会复制进应用私有目录)。'
+                ? '尚未导入模型。需先下载对应语向的模型包(zip)，'
+                    '再选择该 zip 导入(会解压进应用私有目录)。'
                 : '已导入:${_importedGroups.map(_groupLabel).join('、')}',
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
@@ -566,8 +566,8 @@ class _SettingsPageState extends State<SettingsPage> {
                         width: 16,
                         height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.drive_folder_upload),
-                label: Text(_offlineBusy ? '导入中…' : '选择模型目录'),
+                    : const Icon(Icons.archive_outlined),
+                label: Text(_offlineBusy ? '导入中…' : '导入模型包(zip)'),
               ),
               for (final id in _importedGroups)
                 OutlinedButton.icon(
@@ -627,29 +627,23 @@ class _SettingsPageState extends State<SettingsPage> {
     return labels[id] ?? id;
   }
 
-  /// 选目录 → 扫描 → 逐组导入。
+  /// 选 zip 模型包 → 解压导入。
   Future<void> _importOfflineModels() async {
     setState(() => _offlineBusy = true);
     try {
-      final treeUri = await OfflineTranslationService.pickModelDirectory();
-      if (treeUri == null) return; // 用户取消
-      final groups = await OfflineTranslationService.scanModels(treeUri);
-      if (groups.isEmpty) {
-        _toast('该目录下没有找到成组的模型文件');
+      final zipUri = await OfflineTranslationService.pickModelZip();
+      if (zipUri == null) return; // 用户取消
+      final imported = await OfflineTranslationService.importModelZip(zipUri);
+      if (imported.isEmpty) {
+        _toast('该 zip 中没有找到成组的模型文件');
         return;
       }
-      for (final g in groups.where((g) => g.isComplete)) {
-        await OfflineTranslationService.importModel(treeUri, g.id);
-      }
-      // 记住授权目录, 下次免重选。
-      _s = _s.copyWith(offlineModelTreeUri: treeUri);
-      await _service.save(_s);
       // 导入会改变可加载集合, 让协调器重新与原生侧对齐。
       OfflineTranslationCoordinator.instance.invalidate();
-      final imported = await OfflineTranslationService.importedGroups();
+      final groups = await OfflineTranslationService.importedGroups();
       if (!mounted) return;
-      setState(() => _importedGroups = imported);
-      _toast('已导入 ${imported.map(_groupLabel).join('、')}');
+      setState(() => _importedGroups = groups);
+      _toast('已导入 ${groups.map(_groupLabel).join('、')}');
     } catch (e) {
       _toast('导入失败:$e');
     } finally {
