@@ -1,12 +1,6 @@
 {
   "$comment": [
-    "G4 离线翻译模型分发清单。仓库内**不存**模型二进制(共约 131 MB) ——",
-    "GitHub LFS 免费额度存储/流量各 1 GB, 131 MB 会占去 12.8% 存储, 且每次",
-    "clone 消耗约 131 MB 流量(月配额仅够约 7 次)。额度耗尽时 GitHub 会**停用**",
-    "该仓库的 LFS 读写而非自动计费, 届时 clone 会在 checkout 阶段直接失败 ——",
-    "把模型放 LFS 会让「下载兜底」本身成为单点故障, 与入库初衷相反。",
-    "故改为: 仓库存清单 + 校验脚本, 二进制走 自有服务器 / GitHub Release 双源, 上游为最终回退。",
-    "",
+    "G4 离线翻译模型分发清单。",
     "校验口径: sha256 一律为**解压后**文件的哈希, 三个源通用。",
     "sha256_gz 仅对**自有源**(bonsai / release)的压缩包有效 —— 上游的 .gz 是",
     "其自行压缩的产物, 字节与我方不同(gzip 时间戳/级别差异), 但解压后内容一致。"
@@ -17,13 +11,6 @@
   "license_url": "https://www.mozilla.org/MPL/2.0/",
   "upstream_repo": "https://github.com/mozilla/firefox-translations-models",
   "sources": [
-    {
-      "id": "bonsai",
-      "priority": 1,
-      "comment": "自有服务器, 首选。目录结构与本清单的 path 字段一一对应。",
-      "url_template": "https://jiaguwengarm.easong.dpdns.org/bonsai/speak_reader/models/firefox-translations/{path}.gz",
-      "verify_with": "sha256_gz"
-    },
     {
       "id": "release",
       "priority": 2,
